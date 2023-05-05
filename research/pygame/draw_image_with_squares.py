@@ -32,7 +32,7 @@ screen = pygame.display.set_mode(screen_size)
 # Fill the background with white
 screen.fill((255, 255, 255))
 
-image = pygame.image.load('images\hires00.jpg')
+image = pygame.image.load('original_images/hires00.jpg')
 radius = 1
 
 for y in range(0, screen_size[1], radius):
