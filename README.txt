@@ -1,0 +1,1 @@
+Crivate is a program that allows you to encrypt images and view them safely and privately.
