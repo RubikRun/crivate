@@ -4,8 +4,14 @@
 import pygame
 pygame.init()
 
+# Change window's title
+pygame.display.set_caption('Crivate')
+# Change window's icon
+logo = pygame.image.load('logo.png')
+pygame.display.set_icon(logo)
+
 # Set up the drawing window
-screen = pygame.display.set_mode([500, 500])
+screen = pygame.display.set_mode([1700, 900])
 
 # Run until the user asks to quit
 running = True
