@@ -5,7 +5,7 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 import pygame
 pygame.init()
 
-image_name = 'hires00'
+image_name = 'midres01'
 criv_image_path = 'encrypted_images/' + image_name + '.criv'
 
 # View the .criv file
