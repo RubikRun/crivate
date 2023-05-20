@@ -6,7 +6,7 @@ import pygame
 pygame.init()
 
 criv_expected_size = 120612940
-image_name = 'hires00'
+image_name = 'midres01'
 og_image_path = 'original_images/' + image_name + '.png'
 criv_image_path = 'encrypted_images/' + image_name + '.criv'
 

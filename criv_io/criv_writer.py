@@ -3,12 +3,16 @@ import os
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 import pygame
 
+from random import randint
+from criv_io.image_permuter import ImagePermuter
+from utils.math_utils import MathUtils
+
 # Class for writing .criv image files
 class CrivWriter:
     CRIV_SEPARATOR = ','
 
     # Writes a .criv image file reading it from a standard image file
-    def write_criv(og_image_path, criv_image_path):
+    def write_criv(og_image_path, criv_image_path, perm, rgn_count):
         # Load the original image
         image = pygame.image.load(og_image_path)
         # Get image resolution
@@ -22,7 +26,12 @@ class CrivWriter:
             for y in range(image_resolution[1]):
                 for x in range(image_resolution[0]):
                     # Get current pixel color
-                    color = image.get_at([x,y])
+                    color = ImagePermuter.get_color_at(
+                        [x, y],
+                        image,
+                        perm,
+                        rgn_count
+                    )
                     # Write the pixel color to the .criv file,
                     # as 3 RGB components, 3 ints between 0 and 255
                     CrivWriter.__write_num(file, color[0])
