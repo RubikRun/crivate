@@ -13,6 +13,24 @@ class MathUtils:
             result *= i
         # At the end we have 2*3*4*...*n
         return result
+    
+    # Returns the inverse permutation of a given permutation.
+    # If the given permutation is A and the returned inverse is B,
+    # then for all valid indices x we have:
+    #   B[A[x]] = A[B[x]] = x
+    def get_inverse_perm(perm):
+        perm_size = len(perm)
+        # This will be the inverse permutation.
+        # It will be of the same size as the original permutation.
+        # Initialize with an invalid value for each element.
+        inverse = [-1] * perm_size
+        # Traverse the elements
+        for elem in range(perm_size):
+            # Where the original permutation takes the element
+            elem_after_perm = perm[elem]
+            # The inverse permutation should take this element to the original element
+            inverse[elem_after_perm] = elem
+        return inverse
 
     # Returns the permutation with the given lexicographical index,
     # as a list of numbers 0,1,...,n-1 in the order of the premutation.
