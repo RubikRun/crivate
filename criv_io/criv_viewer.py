@@ -9,7 +9,7 @@ from criv_io.image_permuter import ImagePermuter
 # Class for viewing .criv files
 class CrivViewer:
     # Views a .criv image file on a pygame window
-    def view_criv(criv_image_path, perm, rgn_count, window_resolution = [1920, 1080]):
+    def view_criv(criv_image_path, perms, rgn_counts, window_resolution = [1920, 1080]):
         pygame.init()
         # Change window's title
         pygame.display.set_caption('Crivate')
@@ -37,8 +37,8 @@ class CrivViewer:
                     pos_perm_pixel = ImagePermuter.permute_pixel_position(
                         pos_pixel,
                         image_resolution,
-                        perm,
-                        rgn_count
+                        perms,
+                        rgn_counts
                     )
                     # Calculate index of the pixel in the image
                     pos_perm_pixel_idx = pos_perm_pixel[1] * image_resolution[0] + pos_perm_pixel[0]
