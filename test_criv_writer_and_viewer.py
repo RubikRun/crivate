@@ -1,5 +1,6 @@
 from criv_io.criv_writer import CrivWriter
 from criv_io.criv_viewer import CrivViewer
+from criv_io.criv_key import CrivKey
 from utils.math_utils import MathUtils
 from random import randint
 import os
@@ -52,17 +53,23 @@ print(color_perm_idx)
 CrivWriter.write_criv(
     og_image_path,
     criv_image_path,
-    perms,
-    rgn_counts,
-    color_perm
+    CrivKey(
+        len(perms),
+        rgn_counts,
+        perms,
+        color_perm
+    )
 )
 
 # View the .criv file
 CrivViewer.view_criv(
     criv_image_path,
-    inv_perms,
-    rgn_counts,
-    color_inv_perm,
+    CrivKey(
+        len(inv_perms),
+        rgn_counts,
+        inv_perms,
+        color_inv_perm
+    ),
     # screen is 1366 by 768 
     # image is 1008 by 1428
     [int(1366 / 1), int(768 / 1)]

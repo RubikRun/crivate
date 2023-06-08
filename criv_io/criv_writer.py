@@ -5,6 +5,7 @@ import pygame
 
 from random import randint
 from criv_io.image_permuter import ImagePermuter
+from criv_io.criv_key import CrivKey
 from utils.math_utils import MathUtils
 
 # Class for writing .criv image files
@@ -12,7 +13,7 @@ class CrivWriter:
     CRIV_SEPARATOR = ','
 
     # Writes a .criv image file reading it from a standard image file
-    def write_criv(og_image_path, criv_image_path, perms, rgn_counts, color_perm):
+    def write_criv(og_image_path, criv_image_path, criv_key: CrivKey):
         # Load the original image
         image = pygame.image.load(og_image_path)
         # Get image resolution
@@ -29,14 +30,14 @@ class CrivWriter:
                     color = ImagePermuter.get_color_at(
                         [x, y],
                         image,
-                        perms,
-                        rgn_counts
+                        criv_key.rgn_perms,
+                        criv_key.rgn_schemes
                     )
                     # Write the pixel color to the .criv file,
                     # as 3 RGB components, 3 ints between 0 and 255
-                    CrivWriter.__write_num(file, color_perm[color[0]])
-                    CrivWriter.__write_num(file, color_perm[color[1]])
-                    CrivWriter.__write_num(file, color_perm[color[2]])
+                    CrivWriter.__write_num(file, criv_key.color_perm[color[0]])
+                    CrivWriter.__write_num(file, criv_key.color_perm[color[1]])
+                    CrivWriter.__write_num(file, criv_key.color_perm[color[2]])
 
     # Writes a single number to an opened .criv file
     def __write_num(file, num):
