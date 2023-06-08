@@ -12,7 +12,7 @@ class CrivWriter:
     CRIV_SEPARATOR = ','
 
     # Writes a .criv image file reading it from a standard image file
-    def write_criv(og_image_path, criv_image_path, perms, rgn_counts):
+    def write_criv(og_image_path, criv_image_path, perms, rgn_counts, color_perm):
         # Load the original image
         image = pygame.image.load(og_image_path)
         # Get image resolution
@@ -34,9 +34,9 @@ class CrivWriter:
                     )
                     # Write the pixel color to the .criv file,
                     # as 3 RGB components, 3 ints between 0 and 255
-                    CrivWriter.__write_num(file, color[0])
-                    CrivWriter.__write_num(file, color[1])
-                    CrivWriter.__write_num(file, color[2])
+                    CrivWriter.__write_num(file, color_perm[color[0]])
+                    CrivWriter.__write_num(file, color_perm[color[1]])
+                    CrivWriter.__write_num(file, color_perm[color[2]])
 
     # Writes a single number to an opened .criv file
     def __write_num(file, num):

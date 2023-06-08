@@ -9,7 +9,7 @@ from criv_io.image_permuter import ImagePermuter
 # Class for viewing .criv files
 class CrivViewer:
     # Views a .criv image file on a pygame window
-    def view_criv(criv_image_path, perms, rgn_counts, window_resolution = [1920, 1080]):
+    def view_criv(criv_image_path, perms, rgn_counts, color_perm, window_resolution = [1920, 1080]):
         pygame.init()
         # Change window's title
         pygame.display.set_caption('Crivate')
@@ -44,9 +44,9 @@ class CrivViewer:
                     pos_perm_pixel_idx = pos_perm_pixel[1] * image_resolution[0] + pos_perm_pixel[0]
                     # Get color of the pixel by extracting the RGB values from criv data using the pixel index
                     color = (
-                        int(criv_data[2 + pos_perm_pixel_idx * 3 + 0]),
-                        int(criv_data[2 + pos_perm_pixel_idx * 3 + 1]),
-                        int(criv_data[2 + pos_perm_pixel_idx * 3 + 2])
+                        color_perm[int(criv_data[2 + pos_perm_pixel_idx * 3 + 0])],
+                        color_perm[int(criv_data[2 + pos_perm_pixel_idx * 3 + 1])],
+                        color_perm[int(criv_data[2 + pos_perm_pixel_idx * 3 + 2])]
                     )
                     # Draw a square with the color of the image at that point
                     pygame.draw.rect(

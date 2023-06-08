@@ -35,6 +35,7 @@ class ImagePermuter:
         # this means we can't subdivide anymore.
         # In this case return the original position
         if rgn_size[0] <= 0 or rgn_size[1] <= 0:
+            print("WARNING: Regions for the ImagePermuter go too deep")
             return pos_pixel
         # Find the region where the original position is - calculate the region's 2D index
         rgn_og_idx_twodim = [ pos_pixel[0] // rgn_size[0], pos_pixel[1] // rgn_size[1] ]
