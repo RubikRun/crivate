@@ -6,7 +6,6 @@ import pygame
 from random import randint
 from criv_io.image_permuter import ImagePermuter
 from criv_io.criv_key import CrivKey
-from utils.math_utils import MathUtils
 
 # Class for writing .criv image files
 class CrivWriter:
