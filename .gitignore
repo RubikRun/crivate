@@ -1,0 +1,17 @@
+/build/
+/out/
+/.vs/
+/CMakeSettings.json
+*.user
+*.suo
+*.sdf
+*.opensdf
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+*.dir/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+!CMakeLists.txt
