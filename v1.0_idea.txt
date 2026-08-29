@@ -1,0 +1,64 @@
+==== This is the initial idea for crivate. ====
+==== Described by me in natural language. ====
+==== Used as prompt for Cursor Grok 4.6 to generate the file v1.0_plan.md. ====
+
+What is crivate?
+crivate is a program that allows you to encrypt images and view them privately.
+
+How is crivate used?
+crivate is a Windows console application. It's an EXE file that you run from the console.
+You can run it
+- in a folder where you already have a set of encrypted images, or
+- in an empty folder where you can use crivate to add and ecrypt a new image
+A folder acts as a set of encrypted images.
+You're not supposed to manually edit or delete or interact with the files in a folder containing images encrypted with crivate.
+The only way to
+- add a new image to a folder (encrypt)
+- view images in a folder (decrypt)
+- delete an image from a folder
+is through crivate.
+More specifically, you always start with an empty folder.
+You must first run:
+    crivate init
+to initialize the folder as a crivate folder.
+Then, you can run:
+    crivate add {IMAGE_PATH}
+to add a specific image to the folder.
+To see how many images are in a folder you can run:
+    crivate count
+To view image with index x you can run:
+    crivate view {x}
+(Images are indexed starting from 1)
+To view images from index x to index y in a single session you can run:
+    crivate view {x} {y}
+To view all images in a folder you can run:
+    crivate view
+To delete image with index x you can run:
+    crivate del {x}
+To delete images from index x to index y you can run:
+    crivate del {x} {y}
+To delete all images in a folder you can run:
+    crivate del
+or simply delete the folder (be careful to not lose your crivate EXE file).
+Each of these commands will ask you to enter the password of the folder before it actually runs.
+The
+    crivate init
+command will ask you to choose a password to use for your new folder.
+
+Notes:
+- The crivate EXE file is NOT supposed to be placed inside a folder containing encrypted images.
+Instead place the crivate EXE in some common folder (e.g. "C:\Program Files\crivate\") and put that folder in your PATH environment variable,
+or place it wherever and just run it by typing the path to it (e.g. "C:\Users\boris\Downloads\crivate.exe view 5").
+
+How does crivate work?
+1. When adding a new image to a folder, crivate will first read the image file and transform it to raw pixel data (a buffer of RGB values).
+This buffer is then encrypted with a standard secure encryption algorithm using the password provided by the user.
+The encrypted buffer is written to a file (of a custom CRI format) in the folder, keeping the same name as the original file just with a ".cri" extension.
+2. When viewing an image from a folder, crivate will first read the CRI file and decrypt it using the password provided by the user.
+The result is, of course, the raw pixel data (the buffer of RGB values). This raw pixel data is CRUCIALLY not transformed into a standard image format
+like JPG or PNG. Instead it is kept as raw pixel data in the program's memory, not written to disk at any point.
+To actually show the image on screen crivate uses DirectX to draw a bunch of small squares estimating the image.
+Each square is a single color which is determined as the average of the pixels of the image that it covers.
+All squares are NOT drawn at once with a single draw call. Instead they are batched in 100 total batches and drawn with 100 total draw calls.
+The number of squares can be controlled in real time by pressing W key to increase them with 10% and pressing S to decrease them by 10%.
+The number of squares initially is equal to the number of pixels of the image.
