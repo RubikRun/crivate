@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(crivate VERSION 1.0 LANGUAGES CXX)
 
-# cmake -S . -B build -A x64
-# cmake --build build --config Release
+# Generate VS solution: gen.bat
+# Build: cmake --build build --config Release
 
 if(NOT WIN32)
     message(FATAL_ERROR "crivate is a Windows application.")

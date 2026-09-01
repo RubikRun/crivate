@@ -1,6 +1,7 @@
 /build/
 /out/
 /.vs/
+/compile_commands.json
 /CMakeSettings.json
 *.user
 *.suo
