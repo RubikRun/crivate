@@ -16,3 +16,4 @@ CTestTestfile.cmake
 *.vcxproj.filters
 *.sln
 !CMakeLists.txt
+/.cache/
