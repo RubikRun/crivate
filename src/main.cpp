@@ -1,7 +1,10 @@
+#include "cri.h"
 #include "folder.h"
+#include "image_load.h"
 
 #include <cstdio>
 #include <cwchar>
+#include <string>
 #include <vector>
 
 #include <windows.h>
@@ -333,6 +336,78 @@ int cmd_init() {
     return kExitOk;
 }
 
+int cmd_add(const wchar_t* image_path) {
+    const int folder_status = require_folder();
+    if (folder_status != kExitOk) {
+        return folder_status;
+    }
+
+    std::wstring dest;
+    if (!cri_dest_name(image_path, &dest)) {
+        fprintf(stderr, "ERROR: The image path is invalid.\n");
+        return kExitError;
+    }
+    if (cri_exists(dest.c_str())) {
+        fprintf(stderr, "ERROR: A .cri file with this name already exists.\n");
+        return kExitError;
+    }
+
+    const DWORD src_attr = GetFileAttributesW(image_path);
+    if (src_attr == INVALID_FILE_ATTRIBUTES) {
+        fprintf(stderr, "ERROR: The image file was not found.\n");
+        return kExitError;
+    }
+    if ((src_attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        fprintf(stderr, "ERROR: The file is not an image that can be decoded.\n");
+        return kExitError;
+    }
+
+    AesKey key{};
+    const int unlock_status = prompt_unlock(&key);
+    if (unlock_status != kExitOk) {
+        return unlock_status;
+    }
+
+    RgbImage image;
+    const ImageLoadStatus load = image_load_rgb(image_path, &image);
+    if (load != ImageLoadStatus::Ok) {
+        crypto_wipe_key(&key);
+        switch (load) {
+            case ImageLoadStatus::NotFound:
+                fprintf(stderr, "ERROR: The image file was not found.\n");
+                break;
+            case ImageLoadStatus::TooLarge:
+                fprintf(stderr, "ERROR: The image is too large.\n");
+                break;
+            case ImageLoadStatus::NotAnImage:
+                fprintf(stderr, "ERROR: The file is not an image that can be decoded.\n");
+                break;
+            case ImageLoadStatus::IoError:
+            default:
+                fprintf(stderr, "ERROR: Failed to read the image.\n");
+                break;
+        }
+        return kExitError;
+    }
+
+    const CriWriteStatus written =
+        cri_write(dest.c_str(), key, image.width, image.height, image.rgb.data(), image.rgb.size());
+    image.wipe();
+    crypto_wipe_key(&key);
+
+    switch (written) {
+        case CriWriteStatus::Ok:
+            fprintf(stderr, "INFO: The file %ls was created.\n", dest.c_str());
+            return kExitOk;
+        case CriWriteStatus::Exists:
+            fprintf(stderr, "ERROR: A .cri file with this name already exists.\n");
+            return kExitError;
+        default:
+            fprintf(stderr, "ERROR: Failed to add the image.\n");
+            return kExitError;
+    }
+}
+
 int cmd_count() {
     const int folder_status = require_folder();
     if (folder_status != kExitOk) {
@@ -386,7 +461,7 @@ int wmain(int argc, wchar_t* argv[]) {
             print_usage();
             return kExitUsage;
         }
-        return cmd_not_implemented();
+        return cmd_add(argv[2]);
     }
 
     if (wcscmp(cmd, L"count") == 0) {

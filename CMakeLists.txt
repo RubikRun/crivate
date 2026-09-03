@@ -39,6 +39,8 @@ target_link_libraries(crivate PRIVATE
     bcrypt
     user32
     gdi32
+    ole32
+    uuid
 )
 
 set_target_properties(crivate PROPERTIES
