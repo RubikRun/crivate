@@ -69,6 +69,47 @@ bool write_all(HANDLE file, const void* data, size_t n) {
     return true;
 }
 
+bool read_all(HANDLE file, void* data, size_t n) {
+    auto* p = static_cast<uint8_t*>(data);
+    while (n > 0) {
+        const DWORD chunk = n > static_cast<size_t>((std::numeric_limits<DWORD>::max)())
+                                ? (std::numeric_limits<DWORD>::max)()
+                                : static_cast<DWORD>(n);
+        DWORD got = 0;
+        if (!ReadFile(file, p, chunk, &got, nullptr) || got == 0) {
+            return false;
+        }
+        p += got;
+        n -= got;
+    }
+    return true;
+}
+
+bool mul_u64(uint64_t a, uint64_t b, uint64_t* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    if (a != 0 && b > (std::numeric_limits<uint64_t>::max)() / a) {
+        return false;
+    }
+    *out = a * b;
+    return true;
+}
+
+void clear_rgb(uint32_t* width, uint32_t* height, std::vector<uint8_t>* rgb) {
+    if (rgb != nullptr && !rgb->empty()) {
+        crypto_wipe(rgb->data(), rgb->size());
+        rgb->clear();
+        rgb->shrink_to_fit();
+    }
+    if (width != nullptr) {
+        *width = 0;
+    }
+    if (height != nullptr) {
+        *height = 0;
+    }
+}
+
 }  // namespace
 
 bool cri_check_dimensions(uint32_t width, uint32_t height, uint64_t* out_plaintext_bytes) {
@@ -79,13 +120,13 @@ bool cri_check_dimensions(uint32_t width, uint32_t height, uint64_t* out_plainte
         return false;
     }
 
-    const uint64_t pixels = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-    if (pixels > kCriMaxPixels) {
+    uint64_t pixels = 0;
+    if (!mul_u64(width, height, &pixels) || pixels > kCriMaxPixels) {
         return false;
     }
 
-    const uint64_t bytes = pixels * 3u;
-    if (bytes > kCriMaxPlaintextBytes) {
+    uint64_t bytes = 0;
+    if (!mul_u64(pixels, 3, &bytes) || bytes > kCriMaxPlaintextBytes) {
         return false;
     }
 
@@ -206,4 +247,88 @@ CriWriteStatus cri_write(const wchar_t* dest_basename, const AesKey& key, uint32
         return CriWriteStatus::IoError;
     }
     return CriWriteStatus::Ok;
+}
+
+CriReadStatus cri_read(const wchar_t* path, const AesKey& key, uint32_t* width, uint32_t* height,
+                       std::vector<uint8_t>* rgb) {
+    clear_rgb(width, height, rgb);
+
+    if (path == nullptr || path[0] == L'\0' || width == nullptr || height == nullptr ||
+        rgb == nullptr) {
+        return CriReadStatus::InvalidInput;
+    }
+
+    FileHandle file(CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+    if (!file.valid()) {
+        return CriReadStatus::OpenError;
+    }
+
+    LARGE_INTEGER file_size{};
+    if (!GetFileSizeEx(file.h, &file_size) || file_size.QuadPart < 0) {
+        return CriReadStatus::IoError;
+    }
+    if (static_cast<uint64_t>(file_size.QuadPart) < kCriHeaderBytes) {
+        return CriReadStatus::InvalidFile;
+    }
+
+    CriHeader header{};
+    if (!read_all(file.h, &header, sizeof(header))) {
+        crypto_wipe(&header, sizeof(header));
+        return CriReadStatus::IoError;
+    }
+
+    uint64_t payload_bytes = 0;
+    const bool header_ok = memcmp(header.magic, "CRI1", 4) == 0 &&
+                           header.version == kCriVersion &&
+                           cri_check_dimensions(header.width, header.height, &payload_bytes);
+    if (!header_ok) {
+        crypto_wipe(&header, sizeof(header));
+        return CriReadStatus::InvalidFile;
+    }
+
+    const uint64_t expected_size = static_cast<uint64_t>(kCriHeaderBytes) + payload_bytes;
+    if (static_cast<uint64_t>(file_size.QuadPart) != expected_size) {
+        crypto_wipe(&header, sizeof(header));
+        return CriReadStatus::InvalidFile;
+    }
+
+    std::vector<uint8_t> ciphertext;
+    std::vector<uint8_t> plaintext;
+    try {
+        ciphertext.resize(static_cast<size_t>(payload_bytes));
+        plaintext.resize(static_cast<size_t>(payload_bytes));
+    } catch (const std::bad_alloc&) {
+        crypto_wipe(ciphertext.data(), ciphertext.size());
+        crypto_wipe(plaintext.data(), plaintext.size());
+        crypto_wipe(&header, sizeof(header));
+        return CriReadStatus::OutOfMemory;
+    }
+
+    if (!read_all(file.h, ciphertext.data(), ciphertext.size())) {
+        crypto_wipe(ciphertext.data(), ciphertext.size());
+        crypto_wipe(plaintext.data(), plaintext.size());
+        crypto_wipe(&header, sizeof(header));
+        return CriReadStatus::IoError;
+    }
+
+    const uint32_t out_w = header.width;
+    const uint32_t out_h = header.height;
+
+    const bool ok = crypto_gcm_decrypt(key, header.nonce, reinterpret_cast<const uint8_t*>(&header),
+                                       kHeaderAadBytes, ciphertext.data(), ciphertext.size(),
+                                       header.tag, plaintext.data());
+    crypto_wipe(ciphertext.data(), ciphertext.size());
+    ciphertext.clear();
+    crypto_wipe(&header, sizeof(header));
+
+    if (!ok) {
+        crypto_wipe(plaintext.data(), plaintext.size());
+        return CriReadStatus::AuthFailed;
+    }
+
+    *width = out_w;
+    *height = out_h;
+    rgb->swap(plaintext);
+    return CriReadStatus::Ok;
 }

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 constexpr uint32_t kCriVersion = 1;
 constexpr uint32_t kCriMaxWidth = 16384;
@@ -20,6 +21,16 @@ enum class CriWriteStatus {
     IoError,
 };
 
+enum class CriReadStatus {
+    Ok,
+    InvalidInput,
+    OpenError,
+    InvalidFile,
+    AuthFailed,
+    OutOfMemory,
+    IoError,
+};
+
 bool cri_check_dimensions(uint32_t width, uint32_t height, uint64_t* out_plaintext_bytes);
 
 // `{stem}.cri` in cwd from an image path. Example: C:\pics\Holiday.JPG -> Holiday.cri
@@ -29,3 +40,8 @@ bool cri_exists(const wchar_t* dest_basename);
 
 CriWriteStatus cri_write(const wchar_t* dest_basename, const AesKey& key, uint32_t width,
                          uint32_t height, const uint8_t* rgb, size_t rgb_len);
+
+// Header first, then limits and exact size, then decrypt. Never allocates from untrusted
+// width/height until the on-disk size matches the checked payload length.
+CriReadStatus cri_read(const wchar_t* path, const AesKey& key, uint32_t* width, uint32_t* height,
+                       std::vector<uint8_t>* rgb);

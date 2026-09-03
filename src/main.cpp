@@ -397,7 +397,7 @@ int cmd_add(const wchar_t* image_path) {
 
     switch (written) {
         case CriWriteStatus::Ok:
-            fprintf(stderr, "INFO: The file %ls was created.\n", dest.c_str());
+            fprintf(stderr, "INFO: Image was added successfully under %ls.\n", dest.c_str());
             return kExitOk;
         case CriWriteStatus::Exists:
             fprintf(stderr, "ERROR: A .cri file with this name already exists.\n");
