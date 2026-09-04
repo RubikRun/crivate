@@ -3,10 +3,13 @@
 #include "cri.h"
 #include "crypto.h"
 
+#include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -17,6 +20,7 @@
 namespace {
 
 constexpr UINT kDrawBatches = 100;
+constexpr uint32_t kNStepPercent = 20;
 constexpr int kWorkAreaPercent = 80;
 constexpr wchar_t kViewerClass[] = L"crivate.Viewer.1";
 
@@ -65,6 +69,16 @@ public:
     ComPtr(const ComPtr&) = delete;
     ComPtr& operator=(const ComPtr&) = delete;
 
+    ComPtr(ComPtr&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+    ComPtr& operator=(ComPtr&& other) noexcept {
+        if (this != &other) {
+            reset();
+            ptr_ = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
+
     T* get() const { return ptr_; }
     T* operator->() const { return ptr_; }
     explicit operator bool() const { return ptr_ != nullptr; }
@@ -93,6 +107,20 @@ struct ViewerContext {
 
     UINT client_w = 1;
     UINT client_h = 1;
+    double letter_x = 0.0;
+    double letter_y = 0.0;
+    double letter_w = 1.0;
+    double letter_h = 1.0;
+
+    uint32_t img_w = 0;
+    uint32_t img_h = 0;
+    uint32_t n_max = 1;
+    uint32_t target_n = 1;
+    uint32_t grid_cols = 0;
+    uint32_t grid_rows = 0;
+    const uint8_t* rgb = nullptr;
+    bool have_grid = false;
+    bool grid_dirty = false;
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -159,12 +187,35 @@ LRESULT CALLBACK viewer_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
         case WM_CLOSE:
             viewer->running = false;
             return 0;
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
+            const bool repeat = (lparam & (1u << 30)) != 0;
             if (wparam == VK_ESCAPE) {
                 viewer->running = false;
                 return 0;
             }
+            if (!repeat && (wparam == 'W' || wparam == 'S')) {
+                const uint64_t n = viewer->target_n;
+                uint32_t delta = static_cast<uint32_t>((n * kNStepPercent) / 100u);
+                if (delta < 1u) {
+                    delta = 1u;
+                }
+                uint32_t next = viewer->target_n;
+                if (wparam == 'W') {
+                    const uint64_t up = static_cast<uint64_t>(viewer->target_n) + delta;
+                    next = up > viewer->n_max ? viewer->n_max : static_cast<uint32_t>(up);
+                } else if (viewer->target_n <= delta) {
+                    next = 1;
+                } else {
+                    next = viewer->target_n - delta;
+                }
+                if (next != viewer->target_n) {
+                    viewer->target_n = next;
+                    viewer->grid_dirty = true;
+                }
+                return 0;
+            }
             break;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(hwnd, &ps);
@@ -265,6 +316,126 @@ bool fit_client_size(uint32_t img_w, uint32_t img_h, int max_w, int max_h, int* 
 void batch_range(uint32_t batch, uint32_t count, uint32_t* begin, uint32_t* end) {
     *begin = static_cast<uint32_t>((static_cast<uint64_t>(batch) * count) / kDrawBatches);
     *end = static_cast<uint32_t>((static_cast<uint64_t>(batch + 1) * count) / kDrawBatches);
+}
+
+uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+uint32_t round_to_u32_min1(double x) {
+    if (!(x > 0.0)) {
+        return 1;
+    }
+    const double r = std::round(x);
+    if (r < 1.0) {
+        return 1;
+    }
+    const double max_u = static_cast<double>((std::numeric_limits<uint32_t>::max)());
+    if (r >= max_u) {
+        return (std::numeric_limits<uint32_t>::max)();
+    }
+    return static_cast<uint32_t>(r);
+}
+
+void choose_grid(uint32_t n, uint32_t img_w, uint32_t img_h, uint32_t n_max, uint32_t* cols,
+                 uint32_t* rows) {
+    if (n >= n_max) {
+        *cols = img_w;
+        *rows = img_h;
+        return;
+    }
+
+    const double inner =
+        static_cast<double>(n) * static_cast<double>(img_w) / static_cast<double>(img_h);
+    uint32_t c = round_to_u32_min1(std::sqrt(inner));
+    c = clamp_u32(c, 1, img_w);
+    uint32_t r = round_to_u32_min1(static_cast<double>(n) / static_cast<double>(c));
+    r = clamp_u32(r, 1, img_h);
+    *cols = c;
+    *rows = r;
+}
+
+bool choose_grid_self_check() {
+    uint32_t c = 0;
+    uint32_t r = 0;
+    choose_grid(12, 4, 3, 12, &c, &r);
+    if (c != 4 || r != 3) {
+        return false;
+    }
+    choose_grid(6, 4, 3, 12, &c, &r);
+    if (c != 3 || r != 2) {
+        return false;
+    }
+    choose_grid(1, 4, 3, 12, &c, &r);
+    if (c != 1 || r != 1) {
+        return false;
+    }
+    choose_grid(2073600, 1920, 1080, 2073600, &c, &r);
+    return c == 1920 && r == 1080;
+}
+
+void cell_bounds(uint32_t index, uint32_t divisions, uint32_t extent, uint32_t* a0, uint32_t* a1) {
+    *a0 = static_cast<uint32_t>((static_cast<uint64_t>(index) * extent) / divisions);
+    *a1 = static_cast<uint32_t>(((static_cast<uint64_t>(index) + 1u) * extent) / divisions);
+    if (*a0 >= *a1) {
+        if (*a0 >= extent) {
+            *a0 = extent - 1;
+        }
+        *a1 = *a0 + 1;
+    }
+}
+
+void cell_average(const uint8_t* rgb, uint32_t width, uint32_t x0, uint32_t x1, uint32_t y0,
+                  uint32_t y1, uint8_t* r, uint8_t* g, uint8_t* b) {
+    uint64_t sr = 0;
+    uint64_t sg = 0;
+    uint64_t sb = 0;
+    uint64_t n = 0;
+    for (uint32_t y = y0; y < y1; ++y) {
+        const uint8_t* px = rgb + (static_cast<size_t>(y) * width + x0) * 3u;
+        for (uint32_t x = x0; x < x1; ++x) {
+            sr += px[0];
+            sg += px[1];
+            sb += px[2];
+            px += 3;
+            ++n;
+        }
+    }
+    if (n == 0) {
+        *r = 0;
+        *g = 0;
+        *b = 0;
+        return;
+    }
+    *r = static_cast<uint8_t>((sr + n / 2u) / n);
+    *g = static_cast<uint8_t>((sg + n / 2u) / n);
+    *b = static_cast<uint8_t>((sb + n / 2u) / n);
+}
+
+void compute_letterbox(ViewerContext* viewer, uint32_t img_w, uint32_t img_h) {
+    const double client_w = static_cast<double>(viewer->client_w);
+    const double client_h = static_cast<double>(viewer->client_h);
+    const double iw = static_cast<double>(img_w);
+    const double ih = static_cast<double>(img_h);
+    const double img_aspect = iw / ih;
+    const double win_aspect = client_w / client_h;
+    if (win_aspect > img_aspect) {
+        viewer->letter_h = client_h;
+        viewer->letter_w = viewer->letter_h * img_aspect;
+        viewer->letter_x = 0.5 * (client_w - viewer->letter_w);
+        viewer->letter_y = 0.0;
+    } else {
+        viewer->letter_w = client_w;
+        viewer->letter_h = viewer->letter_w / img_aspect;
+        viewer->letter_x = 0.0;
+        viewer->letter_y = 0.5 * (client_h - viewer->letter_h);
+    }
 }
 
 HRESULT create_immutable_vb(ID3D11Device* device, const void* data, UINT bytes,
@@ -508,61 +679,40 @@ ViewerStatus create_pipeline(ViewerContext* viewer) {
     return ViewerStatus::Ok;
 }
 
-ViewerStatus create_instances(ViewerContext* viewer, uint32_t width, uint32_t height,
-                              const uint8_t* rgb) {
-    const uint32_t cols = width;
-    const uint32_t rows = height;
-    const uint64_t pixel_count = static_cast<uint64_t>(cols) * static_cast<uint64_t>(rows);
-    if (pixel_count == 0 || pixel_count > (std::numeric_limits<uint32_t>::max)()) {
+ViewerStatus upload_grid(ViewerContext* viewer, uint32_t cols, uint32_t rows,
+                         ComPtr<ID3D11Buffer> out_batches[kDrawBatches], UINT out_counts[kDrawBatches]) {
+    const uint64_t square_count64 = static_cast<uint64_t>(cols) * static_cast<uint64_t>(rows);
+    if (square_count64 == 0 || square_count64 > (std::numeric_limits<uint32_t>::max)()) {
         return ViewerStatus::InvalidInput;
     }
-    const uint32_t count = static_cast<uint32_t>(pixel_count);
+    const uint32_t count = static_cast<uint32_t>(square_count64);
 
     const double client_w = static_cast<double>(viewer->client_w);
     const double client_h = static_cast<double>(viewer->client_h);
-    const double img_w = static_cast<double>(width);
-    const double img_h = static_cast<double>(height);
-    const double img_aspect = img_w / img_h;
-    const double win_aspect = client_w / client_h;
-
-    double rect_w = 0.0;
-    double rect_h = 0.0;
-    double rect_x = 0.0;
-    double rect_y = 0.0;
-    if (win_aspect > img_aspect) {
-        rect_h = client_h;
-        rect_w = rect_h * img_aspect;
-        rect_x = 0.5 * (client_w - rect_w);
-        rect_y = 0.0;
-    } else {
-        rect_w = client_w;
-        rect_h = rect_w / img_aspect;
-        rect_x = 0.0;
-        rect_y = 0.5 * (client_h - rect_h);
-    }
+    const double img_w = static_cast<double>(viewer->img_w);
+    const double img_h = static_cast<double>(viewer->img_h);
 
     auto fill_instance = [&](uint32_t index, SquareInstance* out) {
         const uint32_t c = index % cols;
         const uint32_t r = index / cols;
-        const double x0 = static_cast<double>(c) * img_w / static_cast<double>(cols);
-        const double x1 = static_cast<double>(c + 1u) * img_w / static_cast<double>(cols);
-        const double y0 = static_cast<double>(r) * img_h / static_cast<double>(rows);
-        const double y1 = static_cast<double>(r + 1u) * img_h / static_cast<double>(rows);
+        uint32_t x0 = 0;
+        uint32_t x1 = 0;
+        uint32_t y0 = 0;
+        uint32_t y1 = 0;
+        cell_bounds(c, cols, viewer->img_w, &x0, &x1);
+        cell_bounds(r, rows, viewer->img_h, &y0, &y1);
 
-        const double left = rect_x + x0 * rect_w / img_w;
-        const double right = rect_x + x1 * rect_w / img_w;
-        const double top = rect_y + y0 * rect_h / img_h;
-        const double bottom = rect_y + y1 * rect_h / img_h;
+        const double left = viewer->letter_x + static_cast<double>(x0) * viewer->letter_w / img_w;
+        const double right = viewer->letter_x + static_cast<double>(x1) * viewer->letter_w / img_w;
+        const double top = viewer->letter_y + static_cast<double>(y0) * viewer->letter_h / img_h;
+        const double bottom = viewer->letter_y + static_cast<double>(y1) * viewer->letter_h / img_h;
 
         out->x = static_cast<float>(2.0 * left / client_w - 1.0);
         out->y = static_cast<float>(1.0 - 2.0 * bottom / client_h);
         out->w = static_cast<float>(2.0 * (right - left) / client_w);
         out->h = static_cast<float>(2.0 * (bottom - top) / client_h);
 
-        const uint8_t* px = rgb + (static_cast<size_t>(r) * width + c) * 3u;
-        out->r = px[0];
-        out->g = px[1];
-        out->b = px[2];
+        cell_average(viewer->rgb, viewer->img_w, x0, x1, y0, y1, &out->r, &out->g, &out->b);
         out->a = 255;
     };
 
@@ -571,7 +721,7 @@ ViewerStatus create_instances(ViewerContext* viewer, uint32_t width, uint32_t he
         uint32_t end = 0;
         batch_range(batch, count, &begin, &end);
         const uint32_t n = end - begin;
-        viewer->batch_counts[batch] = n;
+        out_counts[batch] = n;
         if (n == 0) {
             continue;
         }
@@ -589,13 +739,45 @@ ViewerStatus create_instances(ViewerContext* viewer, uint32_t width, uint32_t he
 
         const UINT bytes = static_cast<UINT>(n * sizeof(SquareInstance));
         const HRESULT hr =
-            create_immutable_vb(viewer->device.get(), cpu.data(), bytes, viewer->batches[batch].put());
+            create_immutable_vb(viewer->device.get(), cpu.data(), bytes, out_batches[batch].put());
         crypto_wipe(cpu.data(), cpu.size() * sizeof(SquareInstance));
         if (FAILED(hr)) {
             return hr == E_OUTOFMEMORY ? ViewerStatus::OutOfMemory : ViewerStatus::DeviceError;
         }
     }
 
+    return ViewerStatus::Ok;
+}
+
+ViewerStatus rebuild_grid(ViewerContext* viewer) {
+    uint32_t cols = 0;
+    uint32_t rows = 0;
+    choose_grid(viewer->target_n, viewer->img_w, viewer->img_h, viewer->n_max, &cols, &rows);
+
+#if defined(_DEBUG)
+    if (viewer->target_n >= viewer->n_max && (cols != viewer->img_w || rows != viewer->img_h)) {
+        return ViewerStatus::InvalidInput;
+    }
+#endif
+
+    if (viewer->have_grid && cols == viewer->grid_cols && rows == viewer->grid_rows) {
+        return ViewerStatus::Ok;
+    }
+
+    ComPtr<ID3D11Buffer> new_batches[kDrawBatches];
+    UINT new_counts[kDrawBatches]{};
+    const ViewerStatus status = upload_grid(viewer, cols, rows, new_batches, new_counts);
+    if (status != ViewerStatus::Ok) {
+        return status;
+    }
+
+    for (uint32_t i = 0; i < kDrawBatches; ++i) {
+        viewer->batches[i] = std::move(new_batches[i]);
+        viewer->batch_counts[i] = new_counts[i];
+    }
+    viewer->grid_cols = cols;
+    viewer->grid_rows = rows;
+    viewer->have_grid = true;
     return ViewerStatus::Ok;
 }
 
@@ -627,6 +809,9 @@ bool render_frame(ViewerContext* viewer) {
     ctx->IASetVertexBuffers(0, 1, &quad, &quad_stride, &offset0);
 
     const UINT inst_stride = sizeof(SquareInstance);
+#if defined(_DEBUG)
+    UINT draws = 0;
+#endif
     for (UINT i = 0; i < kDrawBatches; ++i) {
         const UINT n = viewer->batch_counts[i];
         if (n > 0) {
@@ -635,7 +820,13 @@ bool render_frame(ViewerContext* viewer) {
             ctx->IASetVertexBuffers(1, 1, &inst, &inst_stride, &offset1);
         }
         ctx->DrawInstanced(6, n, 0, 0);
+#if defined(_DEBUG)
+        ++draws;
+#endif
     }
+#if defined(_DEBUG)
+    assert(draws == kDrawBatches);
+#endif
 
     const HRESULT hr = viewer->swapchain->Present(1, 0);
     if (hr == DXGI_STATUS_OCCLUDED) {
@@ -653,6 +844,9 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
         rgb_len != expected) {
         return ViewerStatus::InvalidInput;
     }
+    if (!choose_grid_self_check()) {
+        return ViewerStatus::InvalidInput;
+    }
 
     enable_dpi_awareness();
 
@@ -660,6 +854,13 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
     if (!create_window(&viewer, width, height)) {
         return ViewerStatus::DeviceError;
     }
+
+    viewer.img_w = width;
+    viewer.img_h = height;
+    viewer.rgb = rgb;
+    viewer.n_max = static_cast<uint32_t>(static_cast<uint64_t>(width) * static_cast<uint64_t>(height));
+    viewer.target_n = viewer.n_max;
+    compute_letterbox(&viewer, width, height);
 
     ViewerStatus status = create_device(&viewer);
     if (status != ViewerStatus::Ok) {
@@ -669,7 +870,7 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
     if (status != ViewerStatus::Ok) {
         return status;
     }
-    status = create_instances(&viewer, width, height, rgb);
+    status = rebuild_grid(&viewer);
     if (status != ViewerStatus::Ok) {
         return status;
     }
@@ -677,10 +878,11 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
     if (!render_frame(&viewer)) {
         return ViewerStatus::DeviceError;
     }
+    viewer.running = true;
     ShowWindow(viewer.hwnd, SW_SHOWNORMAL);
     SetForegroundWindow(viewer.hwnd);
 
-    viewer.running = true;
+    ViewerStatus loop_error = ViewerStatus::Ok;
     while (viewer.running) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -694,10 +896,18 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
         if (!viewer.running) {
             break;
         }
+        if (viewer.grid_dirty) {
+            viewer.grid_dirty = false;
+            status = rebuild_grid(&viewer);
+            if (status != ViewerStatus::Ok) {
+                loop_error = status;
+                break;
+            }
+        }
         if (!render_frame(&viewer)) {
             break;
         }
     }
 
-    return ViewerStatus::Ok;
+    return loop_error;
 }

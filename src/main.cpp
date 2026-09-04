@@ -526,11 +526,15 @@ int cmd_view(const wchar_t* index_arg) {
     const ViewerStatus shown = viewer_show(width, height, rgb.data(), rgb.size());
     wipe_rgb(&rgb);
 
-    if (shown != ViewerStatus::Ok) {
-        fprintf(stderr, "ERROR: Failed to open the viewer.\n");
+    if (shown == ViewerStatus::Ok) {
+        return kExitOk;
+    }
+    if (shown == ViewerStatus::OutOfMemory) {
+        fprintf(stderr, "ERROR: Not enough memory to display the image.\n");
         return kExitError;
     }
-    return kExitOk;
+    fprintf(stderr, "ERROR: Failed to open the viewer.\n");
+    return kExitError;
 }
 
 int cmd_not_implemented() {
