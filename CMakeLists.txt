@@ -35,6 +35,7 @@ target_compile_definitions(crivate PRIVATE
 target_link_libraries(crivate PRIVATE
     d3d11
     dxgi
+    d3dcompiler
     windowscodecs
     bcrypt
     user32

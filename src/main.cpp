@@ -1,9 +1,12 @@
 #include "cri.h"
 #include "folder.h"
 #include "image_load.h"
+#include "viewer.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cwchar>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -431,6 +434,105 @@ int cmd_count() {
     return kExitOk;
 }
 
+bool parse_index(const wchar_t* s, uint32_t* out) {
+    if (s == nullptr || s[0] == L'\0' || out == nullptr) {
+        return false;
+    }
+
+    uint32_t value = 0;
+    for (const wchar_t* p = s; *p != L'\0'; ++p) {
+        if (*p < L'0' || *p > L'9') {
+            return false;
+        }
+        const uint32_t digit = static_cast<uint32_t>(*p - L'0');
+        if (value > ((std::numeric_limits<uint32_t>::max)() - digit) / 10u) {
+            return false;
+        }
+        value = value * 10u + digit;
+    }
+    *out = value;
+    return true;
+}
+
+void wipe_rgb(std::vector<uint8_t>* rgb) {
+    if (rgb == nullptr || rgb->empty()) {
+        return;
+    }
+    crypto_wipe(rgb->data(), rgb->size());
+    rgb->clear();
+    rgb->shrink_to_fit();
+}
+
+int cmd_view(const wchar_t* index_arg) {
+    uint32_t index = 0;
+    if (!parse_index(index_arg, &index)) {
+        print_usage();
+        return kExitUsage;
+    }
+
+    const int folder_status = require_folder();
+    if (folder_status != kExitOk) {
+        return folder_status;
+    }
+
+    AesKey key{};
+    const int unlock_status = prompt_unlock(&key);
+    if (unlock_status != kExitOk) {
+        return unlock_status;
+    }
+
+    std::vector<std::wstring> names;
+    if (!folder_list_cri(&names)) {
+        crypto_wipe_key(&key);
+        fprintf(stderr, "ERROR: Failed to list the directory.\n");
+        return kExitError;
+    }
+    if (names.empty()) {
+        crypto_wipe_key(&key);
+        fprintf(stderr, "ERROR: There are no images in the folder.\n");
+        return kExitError;
+    }
+    if (index < 1 || static_cast<size_t>(index) > names.size()) {
+        crypto_wipe_key(&key);
+        fprintf(stderr, "ERROR: The image index is out of range.\n");
+        return kExitError;
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> rgb;
+    const CriReadStatus read = cri_read(names[index - 1].c_str(), key, &width, &height, &rgb);
+    crypto_wipe_key(&key);
+
+    if (read != CriReadStatus::Ok) {
+        wipe_rgb(&rgb);
+        switch (read) {
+            case CriReadStatus::AuthFailed:
+                fprintf(stderr, "ERROR: Wrong password or corrupted file.\n");
+                break;
+            case CriReadStatus::OutOfMemory:
+                fprintf(stderr, "ERROR: The image is too large.\n");
+                break;
+            case CriReadStatus::InvalidFile:
+                fprintf(stderr, "ERROR: The image file is invalid.\n");
+                break;
+            default:
+                fprintf(stderr, "ERROR: Failed to read the image.\n");
+                break;
+        }
+        return kExitError;
+    }
+
+    const ViewerStatus shown = viewer_show(width, height, rgb.data(), rgb.size());
+    wipe_rgb(&rgb);
+
+    if (shown != ViewerStatus::Ok) {
+        fprintf(stderr, "ERROR: Failed to open the viewer.\n");
+        return kExitError;
+    }
+    return kExitOk;
+}
+
 int cmd_not_implemented() {
     fprintf(stderr, "ERROR: This command is not implemented yet.\n");
     return kExitError;
@@ -477,7 +579,7 @@ int wmain(int argc, wchar_t* argv[]) {
             print_usage();
             return kExitUsage;
         }
-        return cmd_not_implemented();
+        return cmd_view(argv[2]);
     }
 
     if (wcscmp(cmd, L"del") == 0) {
