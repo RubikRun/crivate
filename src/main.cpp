@@ -433,7 +433,7 @@ int cmd_count() {
         return kExitError;
     }
 
-    fprintf(stdout, "%zu\n", names.size());
+    fprintf(stdout, "Number of images in crivate folder:\n%zu\n", names.size());
     return kExitOk;
 }
 
