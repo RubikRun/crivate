@@ -26,3 +26,6 @@ bool folder_unlock(const uint8_t* password, size_t password_len, AesKey* out_key
 
 // Basenames of *.cri files in cwd, case-insensitive ordinal sort.
 bool folder_list_cri(std::vector<std::wstring>* names);
+
+// Delete a cwd .cri basename. Rejects paths. Does not touch .crivate.
+bool folder_delete_cri(const wchar_t* basename);

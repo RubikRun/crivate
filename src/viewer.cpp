@@ -450,6 +450,16 @@ HRESULT create_immutable_vb(ID3D11Device* device, const void* data, UINT bytes,
     return device->CreateBuffer(&desc, &init, out);
 }
 
+ViewerStatus status_from_d3d(HRESULT hr) {
+    if (SUCCEEDED(hr)) {
+        return ViewerStatus::Ok;
+    }
+    if (hr == E_OUTOFMEMORY) {
+        return ViewerStatus::OutOfMemory;
+    }
+    return ViewerStatus::DeviceError;
+}
+
 bool create_window(ViewerContext* viewer, uint32_t img_w, uint32_t img_h) {
     viewer->instance = GetModuleHandleW(nullptr);
     if (viewer->instance == nullptr) {
@@ -564,7 +574,7 @@ ViewerStatus create_device(ViewerContext* viewer) {
         hr = try_create(D3D_DRIVER_TYPE_WARP, flags);
     }
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
 
     ComPtr<IDXGIDevice> dxgi_device;
@@ -584,11 +594,11 @@ ViewerStatus create_device(ViewerContext* viewer) {
     hr = viewer->swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D),
                                       reinterpret_cast<void**>(back_buffer.put()));
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
     hr = viewer->device->CreateRenderTargetView(back_buffer.get(), nullptr, viewer->rtv.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
     return ViewerStatus::Ok;
 }
@@ -632,12 +642,12 @@ ViewerStatus create_pipeline(ViewerContext* viewer) {
     hr = viewer->device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(),
                                             nullptr, viewer->vs.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
     hr = viewer->device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(),
                                            nullptr, viewer->ps.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
 
     const D3D11_INPUT_ELEMENT_DESC layout[] = {
@@ -648,7 +658,7 @@ ViewerStatus create_pipeline(ViewerContext* viewer) {
     hr = viewer->device->CreateInputLayout(layout, 3, vs_blob->GetBufferPointer(),
                                            vs_blob->GetBufferSize(), viewer->layout.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
 
     const float quad[] = {
@@ -656,7 +666,7 @@ ViewerStatus create_pipeline(ViewerContext* viewer) {
     };
     hr = create_immutable_vb(viewer->device.get(), quad, sizeof(quad), viewer->quad_vb.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
 
     D3D11_RASTERIZER_DESC rs{};
@@ -665,7 +675,7 @@ ViewerStatus create_pipeline(ViewerContext* viewer) {
     rs.DepthClipEnable = TRUE;
     hr = viewer->device->CreateRasterizerState(&rs, viewer->raster.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
 
     D3D11_DEPTH_STENCIL_DESC ds{};
@@ -673,7 +683,7 @@ ViewerStatus create_pipeline(ViewerContext* viewer) {
     ds.StencilEnable = FALSE;
     hr = viewer->device->CreateDepthStencilState(&ds, viewer->depth_off.put());
     if (FAILED(hr)) {
-        return ViewerStatus::DeviceError;
+        return status_from_d3d(hr);
     }
 
     return ViewerStatus::Ok;
@@ -742,7 +752,7 @@ ViewerStatus upload_grid(ViewerContext* viewer, uint32_t cols, uint32_t rows,
             create_immutable_vb(viewer->device.get(), cpu.data(), bytes, out_batches[batch].put());
         crypto_wipe(cpu.data(), cpu.size() * sizeof(SquareInstance));
         if (FAILED(hr)) {
-            return hr == E_OUTOFMEMORY ? ViewerStatus::OutOfMemory : ViewerStatus::DeviceError;
+            return status_from_d3d(hr);
         }
     }
 

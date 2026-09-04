@@ -296,6 +296,39 @@ bool folder_list_cri(std::vector<std::wstring>* names) {
     return true;
 }
 
+bool folder_delete_cri(const wchar_t* basename) {
+    if (basename == nullptr || basename[0] == L'\0') {
+        return false;
+    }
+    if (wcschr(basename, L'\\') != nullptr || wcschr(basename, L'/') != nullptr ||
+        wcschr(basename, L':') != nullptr) {
+        return false;
+    }
+    if (wcscmp(basename, L".") == 0 || wcscmp(basename, L"..") == 0) {
+        return false;
+    }
+    if (!name_has_cri_extension(basename)) {
+        return false;
+    }
+
+    const DWORD attr = GetFileAttributesW(basename);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return false;
+    }
+
+    if (DeleteFileW(basename) != 0) {
+        return true;
+    }
+
+    if ((attr & FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    if (SetFileAttributesW(basename, attr & ~FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    return DeleteFileW(basename) != 0;
+}
+
 bool folder_exe_in_cwd() {
     const DWORD attr = GetFileAttributesW(L"crivate.exe");
     if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {

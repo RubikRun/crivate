@@ -72,7 +72,10 @@ void print_usage() {
             "crivate add <image-path>\n"
             "crivate count\n"
             "crivate view <index>\n"
-            "crivate del <index>\n");
+            "crivate del <index>\n"
+            "\n"
+            "Indices are 1-based from the sorted .cri names in this folder.\n"
+            "Adding or deleting an image can change later indices.\n");
 }
 
 void warn_if_exe_in_cwd() {
@@ -537,9 +540,46 @@ int cmd_view(const wchar_t* index_arg) {
     return kExitError;
 }
 
-int cmd_not_implemented() {
-    fprintf(stderr, "ERROR: This command is not implemented yet.\n");
-    return kExitError;
+int cmd_del(const wchar_t* index_arg) {
+    uint32_t index = 0;
+    if (!parse_index(index_arg, &index)) {
+        print_usage();
+        return kExitUsage;
+    }
+
+    const int folder_status = require_folder();
+    if (folder_status != kExitOk) {
+        return folder_status;
+    }
+
+    AesKey key{};
+    const int unlock_status = prompt_unlock(&key);
+    if (unlock_status != kExitOk) {
+        return unlock_status;
+    }
+    crypto_wipe_key(&key);
+
+    std::vector<std::wstring> names;
+    if (!folder_list_cri(&names)) {
+        fprintf(stderr, "ERROR: Failed to list the directory.\n");
+        return kExitError;
+    }
+    if (names.empty()) {
+        fprintf(stderr, "ERROR: There are no images in the folder.\n");
+        return kExitError;
+    }
+    if (index < 1 || static_cast<size_t>(index) > names.size()) {
+        fprintf(stderr, "ERROR: The image index is out of range.\n");
+        return kExitError;
+    }
+
+    const wchar_t* name = names[index - 1].c_str();
+    if (!folder_delete_cri(name)) {
+        fprintf(stderr, "ERROR: Failed to delete the image.\n");
+        return kExitError;
+    }
+    fprintf(stderr, "INFO: Image was deleted successfully: %ls.\n", name);
+    return kExitOk;
 }
 
 }  // namespace
@@ -591,7 +631,7 @@ int wmain(int argc, wchar_t* argv[]) {
             print_usage();
             return kExitUsage;
         }
-        return cmd_not_implemented();
+        return cmd_del(argv[2]);
     }
 
     print_usage();
