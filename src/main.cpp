@@ -707,9 +707,115 @@ int cmd_view(const wchar_t* index_arg) {
     return kExitError;
 }
 
-int cmd_del(const wchar_t* index_arg) {
-    uint32_t index = 0;
-    if (!parse_index(index_arg, &index)) {
+enum class ConfirmResult {
+    Yes,
+    No,
+    IoError,
+};
+
+bool wide_line_is_yes(const wchar_t* line, size_t n) {
+    return n == 3 && line[0] == L'Y' && line[1] == L'E' && line[2] == L'S';
+}
+
+ConfirmResult read_console_confirm(HANDLE h_in) {
+    wchar_t buf[256];
+    DWORD nchars = 0;
+    const DWORD buf_n = static_cast<DWORD>(sizeof(buf) / sizeof(buf[0]));
+    if (!ReadConsoleW(h_in, buf, buf_n, &nchars, nullptr)) {
+        SecureZeroMemory(buf, sizeof(buf));
+        return ConfirmResult::IoError;
+    }
+
+    const bool got_eol = nchars > 0 && (buf[nchars - 1] == L'\n' || buf[nchars - 1] == L'\r');
+    if (!got_eol && nchars == buf_n) {
+        drain_console_line(h_in);
+        SecureZeroMemory(buf, sizeof(buf));
+        return ConfirmResult::No;
+    }
+
+    while (nchars > 0 && (buf[nchars - 1] == L'\n' || buf[nchars - 1] == L'\r')) {
+        --nchars;
+    }
+    const bool yes = wide_line_is_yes(buf, nchars);
+    SecureZeroMemory(buf, sizeof(buf));
+    return yes ? ConfirmResult::Yes : ConfirmResult::No;
+}
+
+ConfirmResult read_pipe_confirm(HANDLE h_in) {
+    char line[3]{};
+    size_t n = 0;
+    bool too_long = false;
+    for (;;) {
+        unsigned char c = 0;
+        DWORD got = 0;
+        if (!ReadFile(h_in, &c, 1, &got, nullptr)) {
+            return ConfirmResult::IoError;
+        }
+        if (got == 0 || c == '\n') {
+            break;
+        }
+        if (c == '\r') {
+            continue;
+        }
+        if (n < 3) {
+            line[n++] = static_cast<char>(c);
+        } else {
+            too_long = true;
+            drain_pipe_line(h_in);
+            break;
+        }
+    }
+
+    const bool yes = !too_long && n == 3 && line[0] == 'Y' && line[1] == 'E' && line[2] == 'S';
+    return yes ? ConfirmResult::Yes : ConfirmResult::No;
+}
+
+// Echo stays on. The reply must be exactly YES.
+ConfirmResult read_confirm() {
+    HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+    if (h_in == nullptr || h_in == INVALID_HANDLE_VALUE) {
+        return ConfirmResult::IoError;
+    }
+
+    DWORD mode = 0;
+    const bool is_console = GetConsoleMode(h_in, &mode) != 0;
+    if (is_console) {
+        return read_console_confirm(h_in);
+    }
+
+    const ConfirmResult result = read_pipe_confirm(h_in);
+    fputc('\n', stderr);
+    return result;
+}
+
+int confirm_deletion() {
+    fflush(stderr);
+    switch (read_confirm()) {
+        case ConfirmResult::Yes:
+            return kExitOk;
+        case ConfirmResult::No:
+            fprintf(stderr, "ERROR: Deletion was not confirmed.\n");
+            return kExitError;
+        case ConfirmResult::IoError:
+        default:
+            fprintf(stderr, "ERROR: Failed to read the confirmation.\n");
+            return kExitError;
+    }
+}
+
+int cmd_del(int index_count, wchar_t** index_args) {
+    if (index_count < 0 || index_count > 2) {
+        print_usage();
+        return kExitUsage;
+    }
+
+    uint32_t first = 0;
+    uint32_t last = 0;
+    if (index_count >= 1 && !parse_index(index_args[0], &first)) {
+        print_usage();
+        return kExitUsage;
+    }
+    if (index_count == 2 && !parse_index(index_args[1], &last)) {
         print_usage();
         return kExitUsage;
     }
@@ -735,17 +841,52 @@ int cmd_del(const wchar_t* index_arg) {
         fprintf(stderr, "ERROR: There are no images in the folder.\n");
         return kExitError;
     }
-    if (index < 1 || static_cast<size_t>(index) > names.size()) {
-        fprintf(stderr, "ERROR: The image index is out of range.\n");
+    if (names.size() > (std::numeric_limits<uint32_t>::max)()) {
+        fprintf(stderr, "ERROR: Failed to list the directory.\n");
         return kExitError;
     }
 
-    const wchar_t* name = names[index - 1].c_str();
-    if (!folder_delete_cri(name)) {
-        fprintf(stderr, "ERROR: Failed to delete the image.\n");
+    uint32_t begin = 1;
+    uint32_t end = static_cast<uint32_t>(names.size());
+    if (index_count >= 1) {
+        begin = first;
+        end = index_count == 2 ? last : first;
+    }
+
+    if (begin < 1 || end < 1 || static_cast<size_t>(begin) > names.size() ||
+        static_cast<size_t>(end) > names.size()) {
+        fprintf(stderr, "ERROR: The image index is out of range.\n");
         return kExitError;
     }
-    fprintf(stderr, "INFO: Image was deleted successfully: %ls.\n", name);
+    if (begin > end) {
+        fprintf(stderr, "ERROR: The first index is greater than the last index.\n");
+        return kExitError;
+    }
+
+    const size_t remove_count = static_cast<size_t>(end) - static_cast<size_t>(begin) + 1;
+    if (index_count == 0) {
+        fprintf(stderr, "Delete all %zu images? Type YES to confirm: ", names.size());
+    } else if (begin == end) {
+        fprintf(stderr, "Delete image %u (%ls)? Type YES to confirm: ", begin,
+                names[begin - 1].c_str());
+    } else {
+        fprintf(stderr, "Delete images %u through %u (%zu images)? Type YES to confirm: ", begin,
+                end, remove_count);
+    }
+
+    const int confirmed = confirm_deletion();
+    if (confirmed != kExitOk) {
+        return confirmed;
+    }
+
+    for (size_t index = begin; index <= end; ++index) {
+        const wchar_t* name = names[index - 1].c_str();
+        if (!folder_delete_cri(name)) {
+            fprintf(stderr, "ERROR: Failed to delete the image: %ls.\n", name);
+            return kExitError;
+        }
+        fprintf(stderr, "INFO: Image was deleted successfully: %ls.\n", name);
+    }
     return kExitOk;
 }
 
@@ -802,11 +943,11 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     if (wcscmp(cmd, L"del") == 0) {
-        if (argc != 3) {
+        if (argc > 4) {
             print_usage();
             return kExitUsage;
         }
-        return cmd_del(argv[2]);
+        return cmd_del(argc - 2, argv + 2);
     }
 
     print_usage();
