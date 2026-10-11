@@ -1,0 +1,13 @@
+====
+This is a file with TO-DO tasks, usually small things that need to be fixed
+that I notice while in the middle of another task so it's not convenient to fix them at the moment.
+That's why I write them down here.
+Once a TO-DO task is complete, change it from TODO to DONE in the same commit where it's fixed.
+====
+
+             DD.MM.YYYY
+
+- TODO 0000 (11.10.2026): Some images show up with a black vertical bar in the viewer.
+Reducing the resolution by pressing the S key solves the problem.
+Some resolutions have the problem and others don't.
+For example: C:\Users\boris\Pictures\iPhonePhotos_movedToSSD\IMG_0067.JPG

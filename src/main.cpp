@@ -3,6 +3,7 @@
 #include "image_load.h"
 #include "viewer.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
@@ -350,30 +351,188 @@ int cmd_init() {
     return kExitOk;
 }
 
-int cmd_add(const wchar_t* image_path) {
+struct FindHandle {
+    HANDLE h = INVALID_HANDLE_VALUE;
+
+    explicit FindHandle(HANDLE handle) : h(handle) {}
+    FindHandle(const FindHandle&) = delete;
+    FindHandle& operator=(const FindHandle&) = delete;
+
+    ~FindHandle() {
+        if (h != INVALID_HANDLE_VALUE) {
+            FindClose(h);
+            h = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    bool valid() const { return h != INVALID_HANDLE_VALUE; }
+};
+
+const wchar_t* path_file_name(const wchar_t* path) {
+    const wchar_t* base = path;
+    for (const wchar_t* p = path; *p != L'\0'; ++p) {
+        if (*p == L'\\' || *p == L'/') {
+            base = p + 1;
+        }
+    }
+    return base;
+}
+
+bool is_image_file_name(const wchar_t* name) {
+    if (name == nullptr || name[0] == L'\0') {
+        return false;
+    }
+    const wchar_t* dot = wcsrchr(name, L'.');
+    if (dot == nullptr || dot[1] == L'\0') {
+        return false;
+    }
+
+    static const wchar_t* kExtensions[] = {
+        L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff", L".webp",
+    };
+    for (const wchar_t* ext : kExtensions) {
+        if (CompareStringOrdinal(dot, -1, ext, -1, TRUE) == CSTR_EQUAL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool image_file_less(const std::wstring& a, const std::wstring& b) {
+    return CompareStringOrdinal(path_file_name(a.c_str()), -1, path_file_name(b.c_str()), -1,
+                                TRUE) == CSTR_LESS_THAN;
+}
+
+// False means this file had a hard failure. A skipped existing dest is success.
+bool add_one_image(const wchar_t* image_path, const AesKey& key) {
+    std::wstring dest;
+    if (!cri_dest_name(image_path, &dest)) {
+        fprintf(stderr, "ERROR: The image path is invalid: %ls.\n", image_path);
+        return false;
+    }
+    if (cri_exists(dest.c_str())) {
+        fprintf(stderr, "WARNING: Skipping %ls. A .cri file named %ls already exists.\n",
+                image_path, dest.c_str());
+        return true;
+    }
+
+    RgbImage image;
+    const ImageLoadStatus load = image_load_rgb(image_path, &image);
+    if (load != ImageLoadStatus::Ok) {
+        switch (load) {
+            case ImageLoadStatus::NotFound:
+                fprintf(stderr, "ERROR: The image file was not found: %ls.\n", image_path);
+                break;
+            case ImageLoadStatus::TooLarge:
+                fprintf(stderr, "ERROR: The image is too large: %ls.\n", image_path);
+                break;
+            case ImageLoadStatus::NotAnImage:
+                fprintf(stderr, "ERROR: The file is not an image that can be decoded: %ls.\n",
+                        image_path);
+                break;
+            case ImageLoadStatus::IoError:
+            default:
+                fprintf(stderr, "ERROR: Failed to read the image: %ls.\n", image_path);
+                break;
+        }
+        return false;
+    }
+
+    const CriWriteStatus written =
+        cri_write(dest.c_str(), key, image.width, image.height, image.rgb.data(), image.rgb.size());
+    image.wipe();
+
+    switch (written) {
+        case CriWriteStatus::Ok:
+            fprintf(stderr, "INFO: Image was added successfully under %ls.\n", dest.c_str());
+            return true;
+        case CriWriteStatus::Exists:
+            fprintf(stderr, "WARNING: Skipping %ls. A .cri file named %ls already exists.\n",
+                    image_path, dest.c_str());
+            return true;
+        default:
+            fprintf(stderr, "ERROR: Failed to add the image: %ls.\n", image_path);
+            return false;
+    }
+}
+
+// False means this directory argument had a hard failure.
+bool add_directory(const wchar_t* dir, const AesKey& key) {
+    std::wstring prefix(dir);
+    if (!prefix.empty() && prefix.back() != L'\\' && prefix.back() != L'/') {
+        prefix.push_back(L'\\');
+    }
+    const std::wstring pattern = prefix + L"*";
+
+    WIN32_FIND_DATAW fd{};
+    FindHandle find(FindFirstFileW(pattern.c_str(), &fd));
+    if (!find.valid()) {
+        fprintf(stderr, "ERROR: Failed to list the directory: %ls.\n", dir);
+        return false;
+    }
+
+    std::vector<std::wstring> images;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue;
+        }
+        if (!is_image_file_name(fd.cFileName)) {
+            continue;
+        }
+        images.push_back(prefix + fd.cFileName);
+    } while (FindNextFileW(find.h, &fd));
+
+    if (GetLastError() != ERROR_NO_MORE_FILES) {
+        fprintf(stderr, "ERROR: Failed to list the directory: %ls.\n", dir);
+        return false;
+    }
+
+    if (images.empty()) {
+        fprintf(stderr, "WARNING: %ls contains no image files.\n", dir);
+        return true;
+    }
+
+    std::sort(images.begin(), images.end(), image_file_less);
+
+    bool ok = true;
+    for (const std::wstring& path : images) {
+        if (!add_one_image(path.c_str(), key)) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// False means this argument had a hard failure. Skipped files are not failures.
+bool add_argument(const wchar_t* path, const AesKey& key) {
+    if (path == nullptr || path[0] == L'\0') {
+        fprintf(stderr, "ERROR: The image path is invalid.\n");
+        return false;
+    }
+
+    const DWORD attr = GetFileAttributesW(path);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            fprintf(stderr, "ERROR: The path was not found: %ls.\n", path);
+        } else if (err == ERROR_INVALID_NAME) {
+            fprintf(stderr, "ERROR: The image path is invalid: %ls.\n", path);
+        } else {
+            fprintf(stderr, "ERROR: Failed to read the path: %ls.\n", path);
+        }
+        return false;
+    }
+
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return add_directory(path, key);
+    }
+    return add_one_image(path, key);
+}
+
+int cmd_add(int path_count, wchar_t** paths) {
     const int folder_status = require_folder();
     if (folder_status != kExitOk) {
         return folder_status;
-    }
-
-    std::wstring dest;
-    if (!cri_dest_name(image_path, &dest)) {
-        fprintf(stderr, "ERROR: The image path is invalid.\n");
-        return kExitError;
-    }
-    if (cri_exists(dest.c_str())) {
-        fprintf(stderr, "ERROR: A .cri file with this name already exists.\n");
-        return kExitError;
-    }
-
-    const DWORD src_attr = GetFileAttributesW(image_path);
-    if (src_attr == INVALID_FILE_ATTRIBUTES) {
-        fprintf(stderr, "ERROR: The image file was not found.\n");
-        return kExitError;
-    }
-    if ((src_attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-        fprintf(stderr, "ERROR: The file is not an image that can be decoded.\n");
-        return kExitError;
     }
 
     AesKey key{};
@@ -382,44 +541,14 @@ int cmd_add(const wchar_t* image_path) {
         return unlock_status;
     }
 
-    RgbImage image;
-    const ImageLoadStatus load = image_load_rgb(image_path, &image);
-    if (load != ImageLoadStatus::Ok) {
-        crypto_wipe_key(&key);
-        switch (load) {
-            case ImageLoadStatus::NotFound:
-                fprintf(stderr, "ERROR: The image file was not found.\n");
-                break;
-            case ImageLoadStatus::TooLarge:
-                fprintf(stderr, "ERROR: The image is too large.\n");
-                break;
-            case ImageLoadStatus::NotAnImage:
-                fprintf(stderr, "ERROR: The file is not an image that can be decoded.\n");
-                break;
-            case ImageLoadStatus::IoError:
-            default:
-                fprintf(stderr, "ERROR: Failed to read the image.\n");
-                break;
+    bool hard_failure = false;
+    for (int i = 0; i < path_count; ++i) {
+        if (!add_argument(paths[i], key)) {
+            hard_failure = true;
         }
-        return kExitError;
     }
-
-    const CriWriteStatus written =
-        cri_write(dest.c_str(), key, image.width, image.height, image.rgb.data(), image.rgb.size());
-    image.wipe();
     crypto_wipe_key(&key);
-
-    switch (written) {
-        case CriWriteStatus::Ok:
-            fprintf(stderr, "INFO: Image was added successfully under %ls.\n", dest.c_str());
-            return kExitOk;
-        case CriWriteStatus::Exists:
-            fprintf(stderr, "ERROR: A .cri file with this name already exists.\n");
-            return kExitError;
-        default:
-            fprintf(stderr, "ERROR: Failed to add the image.\n");
-            return kExitError;
-    }
+    return hard_failure ? kExitError : kExitOk;
 }
 
 int cmd_count() {
@@ -641,11 +770,11 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     if (wcscmp(cmd, L"add") == 0) {
-        if (argc != 3) {
+        if (argc < 3) {
             print_usage();
             return kExitUsage;
         }
-        return cmd_add(argv[2]);
+        return cmd_add(argc - 2, argv + 2);
     }
 
     if (wcscmp(cmd, L"count") == 0) {
