@@ -69,13 +69,21 @@ struct ConsoleEchoRestorer {
 void print_usage() {
     fprintf(stderr,
             "crivate init\n"
-            "crivate add <image-path>\n"
+            "crivate add <image-path> [image-path ...]\n"
             "crivate count\n"
+            "crivate list\n"
+            "crivate view\n"
             "crivate view <index>\n"
+            "crivate view <first> <last>\n"
+            "crivate del\n"
             "crivate del <index>\n"
+            "crivate del <first> <last>\n"
+            "crivate passwd\n"
             "\n"
             "Indices are 1-based from the sorted .cri names in this folder.\n"
-            "Adding or deleting an image can change later indices.\n");
+            "Adding or deleting an image can change later indices.\n"
+            "A directory passed to add contributes the image files directly inside it, "
+            "not nested folders.\n");
 }
 
 void warn_if_exe_in_cwd() {
@@ -280,7 +288,7 @@ int prompt_unlock(AesKey* key) {
     password.wipe();
     if (!ok) {
         crypto_wipe_key(key);
-        fprintf(stderr, "ERROR: Wrong password or corrupted file.\n");
+        fprintf(stderr, "ERROR: Wrong password.\n");
         return kExitError;
     }
     return kExitOk;
@@ -437,6 +445,36 @@ int cmd_count() {
     return kExitOk;
 }
 
+int cmd_list() {
+    const int folder_status = require_folder();
+    if (folder_status != kExitOk) {
+        return folder_status;
+    }
+
+    AesKey key{};
+    const int unlock_status = prompt_unlock(&key);
+    if (unlock_status != kExitOk) {
+        return unlock_status;
+    }
+    crypto_wipe_key(&key);
+
+    std::vector<std::wstring> names;
+    if (!folder_list_cri(&names)) {
+        fprintf(stderr, "ERROR: Failed to list the directory.\n");
+        return kExitError;
+    }
+
+    if (names.empty()) {
+        fprintf(stdout, "There are no images in the folder.\n");
+        return kExitOk;
+    }
+
+    for (size_t i = 0; i < names.size(); ++i) {
+        fprintf(stdout, "%zu  %ls\n", i + 1, names[i].c_str());
+    }
+    return kExitOk;
+}
+
 bool parse_index(const wchar_t* s, uint32_t* out) {
     if (s == nullptr || s[0] == L'\0' || out == nullptr) {
         return false;
@@ -511,7 +549,7 @@ int cmd_view(const wchar_t* index_arg) {
         wipe_rgb(&rgb);
         switch (read) {
             case CriReadStatus::AuthFailed:
-                fprintf(stderr, "ERROR: Wrong password or corrupted file.\n");
+                fprintf(stderr, "ERROR: The image file is corrupted.\n");
                 break;
             case CriReadStatus::OutOfMemory:
                 fprintf(stderr, "ERROR: The image is too large.\n");
@@ -616,6 +654,14 @@ int wmain(int argc, wchar_t* argv[]) {
             return kExitUsage;
         }
         return cmd_count();
+    }
+
+    if (wcscmp(cmd, L"list") == 0) {
+        if (argc != 2) {
+            print_usage();
+            return kExitUsage;
+        }
+        return cmd_list();
     }
 
     if (wcscmp(cmd, L"view") == 0) {
