@@ -7,7 +7,6 @@ Once a TO-DO task is complete, change it from TODO to DONE in the same commit wh
 
              DD.MM.YYYY
 
-- TODO 0000 (11.10.2026): Some images show up with a black vertical bar in the viewer.
+- DONE 0000 (11.10.2026): Some images show up with a black vertical bar in the viewer.
 Reducing the resolution by pressing the S key solves the problem.
 Some resolutions have the problem and others don't.
-For example: C:\Users\boris\Pictures\iPhonePhotos_movedToSSD\IMG_0067.JPG

@@ -38,7 +38,11 @@ struct VSOut {
 
 VSOut VSMain(VSIn input) {
     VSOut output;
-    output.pos = float4(input.rect.xy + input.rect.zw * input.corner, 0.0f, 1.0f);
+    // Pick the stored edges. Adding a width here rounds each square differently,
+    // and the black clear shows through the crack as a vertical or horizontal line.
+    float x = input.corner.x < 0.5f ? input.rect.x : input.rect.z;
+    float y = input.corner.y < 0.5f ? input.rect.y : input.rect.w;
+    output.pos = float4(x, y, 0.0f, 1.0f);
     output.color = input.color;
     return output;
 }
@@ -49,10 +53,10 @@ float4 PSMain(VSOut input) : SV_TARGET {
 )";
 
 struct SquareInstance {
-    float x;
-    float y;
-    float w;
-    float h;
+    float x0;
+    float y0;
+    float x1;
+    float y1;
     uint8_t r;
     uint8_t g;
     uint8_t b;
@@ -717,10 +721,12 @@ ViewerStatus upload_grid(ViewerContext* viewer, uint32_t cols, uint32_t rows,
         const double top = viewer->letter_y + static_cast<double>(y0) * viewer->letter_h / img_h;
         const double bottom = viewer->letter_y + static_cast<double>(y1) * viewer->letter_h / img_h;
 
-        out->x = static_cast<float>(2.0 * left / client_w - 1.0);
-        out->y = static_cast<float>(1.0 - 2.0 * bottom / client_h);
-        out->w = static_cast<float>(2.0 * (right - left) / client_w);
-        out->h = static_cast<float>(2.0 * (bottom - top) / client_h);
+        // Absolute edges, so the square on the other side of a shared boundary
+        // gets the same float and the rasterizer does not drop the pixels between them.
+        out->x0 = static_cast<float>(2.0 * left / client_w - 1.0);
+        out->y0 = static_cast<float>(1.0 - 2.0 * bottom / client_h);
+        out->x1 = static_cast<float>(2.0 * right / client_w - 1.0);
+        out->y1 = static_cast<float>(1.0 - 2.0 * top / client_h);
 
         cell_average(viewer->rgb, viewer->img_w, x0, x1, y0, y1, &out->r, &out->g, &out->b);
         out->a = 255;
