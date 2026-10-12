@@ -633,9 +633,86 @@ void wipe_rgb(std::vector<uint8_t>* rgb) {
     rgb->shrink_to_fit();
 }
 
-int cmd_view(const wchar_t* index_arg) {
-    uint32_t index = 0;
-    if (!parse_index(index_arg, &index)) {
+void print_cri_read_error(CriReadStatus status) {
+    switch (status) {
+        case CriReadStatus::AuthFailed:
+            fprintf(stderr, "ERROR: The image file is corrupted.\n");
+            break;
+        case CriReadStatus::OutOfMemory:
+            fprintf(stderr, "ERROR: The image is too large.\n");
+            break;
+        case CriReadStatus::InvalidFile:
+            fprintf(stderr, "ERROR: The image file is invalid.\n");
+            break;
+        default:
+            fprintf(stderr, "ERROR: Failed to read the image.\n");
+            break;
+    }
+}
+
+struct ViewSession {
+    AesKey* key = nullptr;
+    std::vector<std::wstring> set;
+    size_t index = 0;
+    std::vector<uint8_t> rgb;
+};
+
+bool view_load_delta(void* user, int delta, uint32_t* width, uint32_t* height,
+                     const uint8_t** rgb_out, size_t* rgb_len) {
+    auto* session = static_cast<ViewSession*>(user);
+    if (session == nullptr || session->key == nullptr || width == nullptr || height == nullptr ||
+        rgb_out == nullptr || rgb_len == nullptr) {
+        return false;
+    }
+
+    const size_t n = session->set.size();
+    if (n <= 1) {
+        return false;
+    }
+
+    size_t next = session->index;
+    if (delta > 0) {
+        next = (session->index + 1) % n;
+    } else if (delta < 0) {
+        next = (session->index + n - 1) % n;
+    } else {
+        return false;
+    }
+
+    uint32_t loaded_w = 0;
+    uint32_t loaded_h = 0;
+    std::vector<uint8_t> fresh;
+    const CriReadStatus read =
+        cri_read(session->set[next].c_str(), *session->key, &loaded_w, &loaded_h, &fresh);
+    if (read != CriReadStatus::Ok) {
+        wipe_rgb(&fresh);
+        print_cri_read_error(read);
+        return false;
+    }
+
+    wipe_rgb(&session->rgb);
+    session->rgb.swap(fresh);
+    session->index = next;
+    *width = loaded_w;
+    *height = loaded_h;
+    *rgb_out = session->rgb.data();
+    *rgb_len = session->rgb.size();
+    return true;
+}
+
+int cmd_view(int index_count, wchar_t** index_args) {
+    if (index_count < 0 || index_count > 2) {
+        print_usage();
+        return kExitUsage;
+    }
+
+    uint32_t first = 0;
+    uint32_t last = 0;
+    if (index_count >= 1 && !parse_index(index_args[0], &first)) {
+        print_usage();
+        return kExitUsage;
+    }
+    if (index_count == 2 && !parse_index(index_args[1], &last)) {
         print_usage();
         return kExitUsage;
     }
@@ -662,39 +739,53 @@ int cmd_view(const wchar_t* index_arg) {
         fprintf(stderr, "ERROR: There are no images in the folder.\n");
         return kExitError;
     }
-    if (index < 1 || static_cast<size_t>(index) > names.size()) {
+    if (names.size() > (std::numeric_limits<uint32_t>::max)()) {
+        crypto_wipe_key(&key);
+        fprintf(stderr, "ERROR: Failed to list the directory.\n");
+        return kExitError;
+    }
+
+    uint32_t begin = 1;
+    uint32_t end = static_cast<uint32_t>(names.size());
+    if (index_count >= 1) {
+        begin = first;
+        end = index_count == 2 ? last : first;
+    }
+    if (begin < 1 || end < 1 || static_cast<size_t>(begin) > names.size() ||
+        static_cast<size_t>(end) > names.size()) {
         crypto_wipe_key(&key);
         fprintf(stderr, "ERROR: The image index is out of range.\n");
         return kExitError;
     }
-
-    uint32_t width = 0;
-    uint32_t height = 0;
-    std::vector<uint8_t> rgb;
-    const CriReadStatus read = cri_read(names[index - 1].c_str(), key, &width, &height, &rgb);
-    crypto_wipe_key(&key);
-
-    if (read != CriReadStatus::Ok) {
-        wipe_rgb(&rgb);
-        switch (read) {
-            case CriReadStatus::AuthFailed:
-                fprintf(stderr, "ERROR: The image file is corrupted.\n");
-                break;
-            case CriReadStatus::OutOfMemory:
-                fprintf(stderr, "ERROR: The image is too large.\n");
-                break;
-            case CriReadStatus::InvalidFile:
-                fprintf(stderr, "ERROR: The image file is invalid.\n");
-                break;
-            default:
-                fprintf(stderr, "ERROR: Failed to read the image.\n");
-                break;
-        }
+    if (begin > end) {
+        crypto_wipe_key(&key);
+        fprintf(stderr, "ERROR: The first index is greater than the last index.\n");
         return kExitError;
     }
 
-    const ViewerStatus shown = viewer_show(width, height, rgb.data(), rgb.size());
-    wipe_rgb(&rgb);
+    ViewSession session;
+    session.key = &key;
+    session.index = 0;
+    session.set.reserve(static_cast<size_t>(end) - static_cast<size_t>(begin) + 1);
+    for (size_t i = begin; i <= end; ++i) {
+        session.set.push_back(std::move(names[i - 1]));
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    const CriReadStatus read =
+        cri_read(session.set[0].c_str(), key, &width, &height, &session.rgb);
+    if (read != CriReadStatus::Ok) {
+        wipe_rgb(&session.rgb);
+        crypto_wipe_key(&key);
+        print_cri_read_error(read);
+        return kExitError;
+    }
+
+    const ViewerStatus shown = viewer_show(width, height, session.rgb.data(), session.rgb.size(),
+                                           view_load_delta, &session);
+    wipe_rgb(&session.rgb);
+    crypto_wipe_key(&key);
 
     if (shown == ViewerStatus::Ok) {
         return kExitOk;
@@ -935,11 +1026,11 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     if (wcscmp(cmd, L"view") == 0) {
-        if (argc != 3) {
+        if (argc > 4) {
             print_usage();
             return kExitUsage;
         }
-        return cmd_view(argv[2]);
+        return cmd_view(argc - 2, argv + 2);
     }
 
     if (wcscmp(cmd, L"del") == 0) {

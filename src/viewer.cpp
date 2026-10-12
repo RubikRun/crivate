@@ -125,6 +125,9 @@ struct ViewerContext {
     const uint8_t* rgb = nullptr;
     bool have_grid = false;
     bool grid_dirty = false;
+    ViewerLoadFn load_delta = nullptr;
+    void* load_user = nullptr;
+    ViewerStatus pending_error = ViewerStatus::Ok;
 
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -175,6 +178,8 @@ struct ViewerContext {
     }
 };
 
+void request_image_switch(ViewerContext* viewer, int delta);
+
 LRESULT CALLBACK viewer_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_NCCREATE) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
@@ -216,6 +221,12 @@ LRESULT CALLBACK viewer_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
                     viewer->target_n = next;
                     viewer->grid_dirty = true;
                 }
+                return 0;
+            }
+            if (!repeat && (wparam == 'A' || wparam == VK_LEFT || wparam == 'D' ||
+                            wparam == VK_RIGHT)) {
+                const int delta = (wparam == 'A' || wparam == VK_LEFT) ? -1 : 1;
+                request_image_switch(viewer, delta);
                 return 0;
             }
             break;
@@ -440,6 +451,37 @@ void compute_letterbox(ViewerContext* viewer, uint32_t img_w, uint32_t img_h) {
         viewer->letter_x = 0.0;
         viewer->letter_y = 0.5 * (client_h - viewer->letter_h);
     }
+}
+
+void request_image_switch(ViewerContext* viewer, int delta) {
+    if (viewer == nullptr || viewer->load_delta == nullptr) {
+        return;
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    const uint8_t* rgb = nullptr;
+    size_t rgb_len = 0;
+    if (!viewer->load_delta(viewer->load_user, delta, &width, &height, &rgb, &rgb_len)) {
+        return;
+    }
+
+    uint64_t expected = 0;
+    if (!cri_check_dimensions(width, height, &expected) || rgb == nullptr || rgb_len != expected) {
+        viewer->pending_error = ViewerStatus::InvalidInput;
+        viewer->running = false;
+        return;
+    }
+
+    viewer->img_w = width;
+    viewer->img_h = height;
+    viewer->rgb = rgb;
+    viewer->n_max =
+        static_cast<uint32_t>(static_cast<uint64_t>(width) * static_cast<uint64_t>(height));
+    viewer->target_n = viewer->n_max;
+    compute_letterbox(viewer, width, height);
+    viewer->have_grid = false;
+    viewer->grid_dirty = true;
 }
 
 HRESULT create_immutable_vb(ID3D11Device* device, const void* data, UINT bytes,
@@ -854,7 +896,8 @@ bool render_frame(ViewerContext* viewer) {
 
 }  // namespace
 
-ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, size_t rgb_len) {
+ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, size_t rgb_len,
+                         ViewerLoadFn load_delta, void* user) {
     uint64_t expected = 0;
     if (!cri_check_dimensions(width, height, &expected) || rgb == nullptr ||
         rgb_len != expected) {
@@ -867,6 +910,8 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
     enable_dpi_awareness();
 
     ViewerContext viewer;
+    viewer.load_delta = load_delta;
+    viewer.load_user = user;
     if (!create_window(&viewer, width, height)) {
         return ViewerStatus::DeviceError;
     }
@@ -910,6 +955,9 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
             DispatchMessageW(&msg);
         }
         if (!viewer.running) {
+            if (viewer.pending_error != ViewerStatus::Ok) {
+                loop_error = viewer.pending_error;
+            }
             break;
         }
         if (viewer.grid_dirty) {
