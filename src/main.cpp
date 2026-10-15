@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <new>
 #include <cstdio>
 #include <cwchar>
 #include <limits>
@@ -79,7 +80,7 @@ void print_usage() {
             "crivate del\n"
             "crivate del <index>\n"
             "crivate del <first> <last>\n"
-            "crivate passwd\n"
+            "crivate password\n"
             "\n"
             "Indices are 1-based from the sorted .cri names in this folder.\n"
             "Adding or deleting an image can change later indices.\n"
@@ -981,6 +982,182 @@ int cmd_del(int index_count, wchar_t** index_args) {
     return kExitOk;
 }
 
+struct RekeyFile {
+    std::wstring temp;
+    std::wstring dest;
+};
+
+struct TempCleaner {
+    std::vector<RekeyFile>* files = nullptr;
+    std::wstring* header = nullptr;
+
+    ~TempCleaner() {
+        if (files != nullptr) {
+            for (const RekeyFile& file : *files) {
+                if (!file.temp.empty()) {
+                    DeleteFileW(file.temp.c_str());
+                }
+            }
+        }
+        if (header != nullptr && !header->empty()) {
+            DeleteFileW(header->c_str());
+        }
+    }
+};
+
+bool replace_with_temp(const wchar_t* temp, const wchar_t* dest) {
+    if (temp == nullptr || temp[0] == L'\0' || dest == nullptr || dest[0] == L'\0') {
+        return false;
+    }
+    if (MoveFileExW(temp, dest, MOVEFILE_REPLACE_EXISTING) != 0) {
+        return true;
+    }
+
+    const DWORD attr = GetFileAttributesW(dest);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    if (SetFileAttributesW(dest, attr & ~FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    return MoveFileExW(temp, dest, MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
+void print_password_read_error(CriReadStatus status, const wchar_t* name) {
+    switch (status) {
+        case CriReadStatus::AuthFailed:
+            fprintf(stderr, "ERROR: Failed to change the password. The image file is corrupted: %ls.\n",
+                    name);
+            break;
+        case CriReadStatus::OutOfMemory:
+            fprintf(stderr, "ERROR: Failed to change the password. The image is too large: %ls.\n",
+                    name);
+            break;
+        case CriReadStatus::InvalidFile:
+            fprintf(stderr, "ERROR: Failed to change the password. The image file is invalid: %ls.\n",
+                    name);
+            break;
+        default:
+            fprintf(stderr, "ERROR: Failed to change the password. Failed to read the image: %ls.\n",
+                    name);
+            break;
+    }
+}
+
+int cmd_password() {
+    const int folder_status = require_folder();
+    if (folder_status != kExitOk) {
+        return folder_status;
+    }
+
+    AesKey old_key{};
+    FolderRekey rekey{};
+    struct KeyGuard {
+        AesKey* old_key;
+        FolderRekey* rekey;
+        ~KeyGuard() {
+            crypto_wipe_key(old_key);
+            folder_wipe_rekey(rekey);
+        }
+    } keys{&old_key, &rekey};
+
+    const int unlock_status = prompt_unlock(&old_key);
+    if (unlock_status != kExitOk) {
+        return unlock_status;
+    }
+
+    SecretBuf next_password;
+    SecretBuf confirm;
+    const int pw_status = report_password_read(prompt_password("New password: ", &next_password));
+    if (pw_status != kExitOk) {
+        return pw_status;
+    }
+    const int confirm_status =
+        report_password_read(prompt_password("Confirm password: ", &confirm));
+    if (confirm_status != kExitOk) {
+        return confirm_status;
+    }
+    if (!passwords_equal(next_password, confirm)) {
+        fprintf(stderr, "ERROR: The passwords do not match.\n");
+        return kExitError;
+    }
+    confirm.wipe();
+
+    uint32_t iters = 0;
+    if (!folder_kdf_iters(&iters) ||
+        !folder_prepare_rekey(next_password.bytes.data(), next_password.bytes.size(), iters,
+                              &rekey)) {
+        next_password.wipe();
+        fprintf(stderr, "ERROR: Failed to change the password.\n");
+        return kExitError;
+    }
+    next_password.wipe();
+
+    std::vector<std::wstring> names;
+    if (!folder_list_cri(&names)) {
+        fprintf(stderr, "ERROR: Failed to list the directory.\n");
+        return kExitError;
+    }
+
+    std::vector<RekeyFile> files;
+    std::wstring header_temp;
+    TempCleaner temps{&files, &header_temp};
+
+    try {
+        files.reserve(names.size());
+        for (const std::wstring& name : names) {
+            uint32_t width = 0;
+            uint32_t height = 0;
+            std::vector<uint8_t> rgb;
+            const CriReadStatus read = cri_read(name.c_str(), old_key, &width, &height, &rgb);
+            if (read != CriReadStatus::Ok) {
+                wipe_rgb(&rgb);
+                print_password_read_error(read, name.c_str());
+                return kExitError;
+            }
+
+            files.push_back(RekeyFile{});
+            files.back().dest = name;
+            const CriWriteStatus written = cri_write_temp(rekey.key, width, height, rgb.data(),
+                                                          rgb.size(), &files.back().temp);
+            wipe_rgb(&rgb);
+            if (written != CriWriteStatus::Ok || files.back().temp.empty()) {
+                files.pop_back();
+                fprintf(stderr, "ERROR: Failed to change the password.\n");
+                return kExitError;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        fprintf(stderr, "ERROR: Failed to change the password.\n");
+        return kExitError;
+    }
+
+    if (!folder_write_rekey_temp(rekey, &header_temp)) {
+        fprintf(stderr, "ERROR: Failed to change the password.\n");
+        return kExitError;
+    }
+
+    bool replaced_image = false;
+    for (RekeyFile& file : files) {
+        if (!replace_with_temp(file.temp.c_str(), file.dest.c_str())) {
+            fprintf(stderr, replaced_image ? "ERROR: Failed to finish changing the password.\n"
+                                           : "ERROR: Failed to change the password.\n");
+            return kExitError;
+        }
+        file.temp.clear();
+        replaced_image = true;
+    }
+    if (!replace_with_temp(header_temp.c_str(), L".crivate")) {
+        fprintf(stderr, files.empty() ? "ERROR: Failed to change the password.\n"
+                                      : "ERROR: Failed to finish changing the password.\n");
+        return kExitError;
+    }
+    header_temp.clear();
+
+    fprintf(stderr, "INFO: The password was changed.\n");
+    return kExitOk;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -1039,6 +1216,14 @@ int wmain(int argc, wchar_t* argv[]) {
             return kExitUsage;
         }
         return cmd_del(argc - 2, argv + 2);
+    }
+
+    if (wcscmp(cmd, L"password") == 0) {
+        if (argc != 2) {
+            print_usage();
+            return kExitUsage;
+        }
+        return cmd_password();
     }
 
     print_usage();

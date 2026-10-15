@@ -41,6 +41,11 @@ bool cri_exists(const wchar_t* dest_basename);
 CriWriteStatus cri_write(const wchar_t* dest_basename, const AesKey& key, uint32_t width,
                          uint32_t height, const uint8_t* rgb, size_t rgb_len);
 
+// Encrypt to a new temp file in cwd. The temp name does not end in .cri and is not renamed
+// onto a destination. On failure no temp is left behind.
+CriWriteStatus cri_write_temp(const AesKey& key, uint32_t width, uint32_t height,
+                              const uint8_t* rgb, size_t rgb_len, std::wstring* out_temp);
+
 // Header first, then limits and exact size, then decrypt. Never allocates from untrusted
 // width/height until the on-disk size matches the checked payload length.
 CriReadStatus cri_read(const wchar_t* path, const AesKey& key, uint32_t* width, uint32_t* height,

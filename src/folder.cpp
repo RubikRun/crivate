@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <new>
 #include <windows.h>
 
 namespace {
@@ -26,7 +27,7 @@ struct CrivateHeader {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(CrivateHeader) == 92, "folder header must be 92 bytes");
+static_assert(sizeof(CrivateHeader) == kCrivateFileBytes, "folder header must be 92 bytes");
 static_assert(offsetof(CrivateHeader, verifier_nonce) == 32,
               "AAD is magic + version + kdf_iters + salt");
 
@@ -260,6 +261,118 @@ bool folder_unlock(const uint8_t* password, size_t password_len, AesKey* out_key
         crypto_wipe_key(out_key);
     }
     return ok;
+}
+
+bool folder_kdf_iters(uint32_t* out) {
+    if (out == nullptr) {
+        return false;
+    }
+
+    CrivateHeader header{};
+    if (!read_header(&header)) {
+        crypto_wipe(&header, sizeof(header));
+        return false;
+    }
+    *out = header.kdf_iters;
+    crypto_wipe(&header, sizeof(header));
+    return true;
+}
+
+void folder_wipe_rekey(FolderRekey* rekey) {
+    if (rekey == nullptr) {
+        return;
+    }
+    crypto_wipe_key(&rekey->key);
+    crypto_wipe(rekey->header, sizeof(rekey->header));
+}
+
+bool folder_prepare_rekey(const uint8_t* password, size_t password_len, uint32_t kdf_iters,
+                          FolderRekey* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    folder_wipe_rekey(out);
+    if (password == nullptr || password_len == 0 || kdf_iters < kMinKdfIters ||
+        kdf_iters > kMaxKdfIters) {
+        return false;
+    }
+
+    CrivateHeader header{};
+    memcpy(header.magic, "CRIVATE1", 8);
+    header.version = kCrivateVersion;
+    header.kdf_iters = kdf_iters;
+
+    AesKey key{};
+    uint8_t canary[kVerifierPlaintextBytes];
+    memset(canary, kVerifierCanary, sizeof(canary));
+
+    const bool ok =
+        crypto_random(header.salt, sizeof(header.salt)) &&
+        crypto_random(header.verifier_nonce, sizeof(header.verifier_nonce)) &&
+        crypto_derive_key(password, password_len, header.salt, sizeof(header.salt),
+                          header.kdf_iters, &key) &&
+        crypto_gcm_encrypt(key, header.verifier_nonce, reinterpret_cast<const uint8_t*>(&header),
+                           kHeaderAadBytes, canary, sizeof(canary), header.verifier_ciphertext,
+                           header.verifier_tag);
+    if (ok) {
+        memcpy(out->key.bytes, key.bytes, kAesKeyBytes);
+        memcpy(out->header, &header, sizeof(header));
+    }
+
+    crypto_wipe_key(&key);
+    crypto_wipe(canary, sizeof(canary));
+    crypto_wipe(&header, sizeof(header));
+    return ok;
+}
+
+static bool path_ends_with_cri(const wchar_t* path) {
+    if (path == nullptr) {
+        return false;
+    }
+    const size_t n = wcslen(path);
+    if (n < 4) {
+        return false;
+    }
+    return CompareStringOrdinal(path + (n - 4), 4, L".cri", 4, TRUE) == CSTR_EQUAL;
+}
+
+bool folder_write_rekey_temp(const FolderRekey& rekey, std::wstring* out_temp) {
+    if (out_temp == nullptr) {
+        return false;
+    }
+    out_temp->clear();
+
+    wchar_t temp_path[MAX_PATH];
+    if (GetTempFileNameW(L".", L"crh", 0, temp_path) == 0) {
+        return false;
+    }
+
+    bool ok = false;
+    {
+        FileHandle file(CreateFileW(temp_path, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (file.valid()) {
+            DWORD written = 0;
+            if (WriteFile(file.h, rekey.header, static_cast<DWORD>(sizeof(rekey.header)), &written,
+                          nullptr) &&
+                written == sizeof(rekey.header) && FlushFileBuffers(file.h)) {
+                ok = true;
+            }
+        }
+    }
+
+    if (!ok || path_ends_with_cri(temp_path)) {
+        DeleteFileW(temp_path);
+        return false;
+    }
+
+    try {
+        *out_temp = temp_path;
+    } catch (const std::bad_alloc&) {
+        DeleteFileW(temp_path);
+        return false;
+    }
+    return true;
 }
 
 bool folder_list_cri(std::vector<std::wstring>* names) {

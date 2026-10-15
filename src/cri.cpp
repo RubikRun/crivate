@@ -110,6 +110,83 @@ void clear_rgb(uint32_t* width, uint32_t* height, std::vector<uint8_t>* rgb) {
     }
 }
 
+bool path_ends_with_cri(const wchar_t* path) {
+    const wchar_t* base = file_name(path);
+    const size_t n = wcslen(base);
+    if (n < 4) {
+        return false;
+    }
+    return CompareStringOrdinal(base + (n - 4), 4, L".cri", 4, TRUE) == CSTR_EQUAL;
+}
+
+CriWriteStatus write_encrypted_temp(const AesKey& key, uint32_t width, uint32_t height,
+                                    const uint8_t* rgb, size_t rgb_len, const wchar_t* prefix,
+                                    wchar_t temp_path[MAX_PATH]) {
+    if (rgb == nullptr || prefix == nullptr || temp_path == nullptr) {
+        return CriWriteStatus::InvalidInput;
+    }
+    temp_path[0] = L'\0';
+
+    uint64_t expected = 0;
+    if (!cri_check_dimensions(width, height, &expected) || rgb_len != expected) {
+        return CriWriteStatus::InvalidInput;
+    }
+
+    CriHeader header{};
+    memcpy(header.magic, "CRI1", 4);
+    header.version = kCriVersion;
+    header.width = width;
+    header.height = height;
+
+    std::vector<uint8_t> ciphertext;
+    try {
+        ciphertext.resize(rgb_len);
+    } catch (const std::bad_alloc&) {
+        return CriWriteStatus::IoError;
+    }
+
+    if (!crypto_random(header.nonce, sizeof(header.nonce))) {
+        crypto_wipe(ciphertext.data(), ciphertext.size());
+        crypto_wipe(&header, sizeof(header));
+        return CriWriteStatus::CryptoError;
+    }
+
+    if (!crypto_gcm_encrypt(key, header.nonce, reinterpret_cast<const uint8_t*>(&header),
+                            kHeaderAadBytes, rgb, rgb_len, ciphertext.data(), header.tag)) {
+        crypto_wipe(ciphertext.data(), ciphertext.size());
+        crypto_wipe(&header, sizeof(header));
+        return CriWriteStatus::CryptoError;
+    }
+
+    if (GetTempFileNameW(L".", prefix, 0, temp_path) == 0) {
+        crypto_wipe(ciphertext.data(), ciphertext.size());
+        crypto_wipe(&header, sizeof(header));
+        return CriWriteStatus::IoError;
+    }
+
+    bool ok = false;
+    {
+        FileHandle file(CreateFileW(temp_path, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+        if (file.valid()) {
+            ok = write_all(file.h, &header, sizeof(header)) &&
+                 write_all(file.h, ciphertext.data(), ciphertext.size()) &&
+                 FlushFileBuffers(file.h);
+        }
+    }
+
+    crypto_wipe(ciphertext.data(), ciphertext.size());
+    ciphertext.clear();
+    crypto_wipe(&header, sizeof(header));
+
+    if (!ok || path_ends_with_cri(temp_path)) {
+        DeleteFileW(temp_path);
+        temp_path[0] = L'\0';
+        return CriWriteStatus::IoError;
+    }
+    return CriWriteStatus::Ok;
+}
+
 }  // namespace
 
 bool cri_check_dimensions(uint32_t width, uint32_t height, uint64_t* out_plaintext_bytes) {
@@ -173,76 +250,45 @@ CriWriteStatus cri_write(const wchar_t* dest_basename, const AesKey& key, uint32
     if (wcschr(dest_basename, L'\\') != nullptr || wcschr(dest_basename, L'/') != nullptr) {
         return CriWriteStatus::InvalidInput;
     }
-
-    uint64_t expected = 0;
-    if (!cri_check_dimensions(width, height, &expected) || rgb_len != expected) {
-        return CriWriteStatus::InvalidInput;
-    }
-
     if (cri_exists(dest_basename)) {
         return CriWriteStatus::Exists;
     }
 
-    CriHeader header{};
-    memcpy(header.magic, "CRI1", 4);
-    header.version = kCriVersion;
-    header.width = width;
-    header.height = height;
+    wchar_t temp_path[MAX_PATH];
+    const CriWriteStatus staged =
+        write_encrypted_temp(key, width, height, rgb, rgb_len, L"cri", temp_path);
+    if (staged != CriWriteStatus::Ok) {
+        return staged;
+    }
 
-    std::vector<uint8_t> ciphertext;
-    try {
-        ciphertext.resize(rgb_len);
-    } catch (const std::bad_alloc&) {
+    if (cri_exists(dest_basename)) {
+        DeleteFileW(temp_path);
+        return CriWriteStatus::Exists;
+    }
+    if (MoveFileW(temp_path, dest_basename) == 0) {
+        DeleteFileW(temp_path);
         return CriWriteStatus::IoError;
     }
+    return CriWriteStatus::Ok;
+}
 
-    if (!crypto_random(header.nonce, sizeof(header.nonce))) {
-        crypto_wipe(ciphertext.data(), ciphertext.size());
-        return CriWriteStatus::CryptoError;
+CriWriteStatus cri_write_temp(const AesKey& key, uint32_t width, uint32_t height,
+                              const uint8_t* rgb, size_t rgb_len, std::wstring* out_temp) {
+    if (out_temp == nullptr) {
+        return CriWriteStatus::InvalidInput;
     }
-
-    if (!crypto_gcm_encrypt(key, header.nonce, reinterpret_cast<const uint8_t*>(&header),
-                            kHeaderAadBytes, rgb, rgb_len, ciphertext.data(), header.tag)) {
-        crypto_wipe(ciphertext.data(), ciphertext.size());
-        crypto_wipe(&header, sizeof(header));
-        return CriWriteStatus::CryptoError;
-    }
+    out_temp->clear();
 
     wchar_t temp_path[MAX_PATH];
-    if (GetTempFileNameW(L".", L"cri", 0, temp_path) == 0) {
-        crypto_wipe(ciphertext.data(), ciphertext.size());
-        crypto_wipe(&header, sizeof(header));
-        return CriWriteStatus::IoError;
+    const CriWriteStatus staged =
+        write_encrypted_temp(key, width, height, rgb, rgb_len, L"crp", temp_path);
+    if (staged != CriWriteStatus::Ok) {
+        return staged;
     }
 
-    bool keep_temp = false;
-    bool ok = false;
-    {
-        FileHandle file(CreateFileW(temp_path, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-        if (file.valid()) {
-            ok = write_all(file.h, &header, sizeof(header)) &&
-                 write_all(file.h, ciphertext.data(), ciphertext.size()) &&
-                 FlushFileBuffers(file.h);
-        }
-    }
-
-    crypto_wipe(ciphertext.data(), ciphertext.size());
-    ciphertext.clear();
-    crypto_wipe(&header, sizeof(header));
-
-    if (ok) {
-        if (cri_exists(dest_basename)) {
-            DeleteFileW(temp_path);
-            return CriWriteStatus::Exists;
-        }
-        ok = MoveFileW(temp_path, dest_basename) != 0;
-        if (ok) {
-            keep_temp = true;
-        }
-    }
-
-    if (!keep_temp) {
+    try {
+        *out_temp = temp_path;
+    } catch (const std::bad_alloc&) {
         DeleteFileW(temp_path);
         return CriWriteStatus::IoError;
     }
