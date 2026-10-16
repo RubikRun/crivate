@@ -10,3 +10,42 @@ Once a TO-DO task is complete, change it from TODO to DONE in the same commit wh
 - DONE 0000 (11.10.2026): Some images show up with a black vertical bar in the viewer.
 Reducing the resolution by pressing the S key solves the problem.
 Some resolutions have the problem and others don't.
+
+- TODO 0001 (16.10.2026): If crivate password fails during the replace phase (phase 2), the images that were already replaced are lost for good.
+Repro: folder with a_red.cri, b_green.cri, j_gradh.cri. Keep b_green.cri open in another program without delete sharing
+(PowerShell: [IO.File]::Open("b_green.cri", 'Open', 'Read', 'Read')), then run crivate password.
+It prints "Failed to finish changing the password." a_red.cri is already encrypted with the new key, .crivate still has the old key,
+and the temp file with the new .crivate is deleted, so the new salt is gone. a_red.cri can't be opened with either password,
+password can't be retried (it stops at a_red.cri as corrupted), and crivate view of the whole folder fails because image 1 is broken.
+Antivirus, backup or sync tools that briefly hold a file open can trigger this. Keep the old .cri files (or at least the new .crivate temp)
+until every rename has succeeded, and roll back or tell the user what to do if a rename fails.
+
+- TODO 0002 (16.10.2026): File names with non-ASCII characters break crivate's output (list, the del prompt, INFO/WARNING/ERROR lines).
+Names are printed with %ls through the CRT's default "C" locale. For Cyrillic/CJK names the print fails at the name and the rest of the line is lost,
+including the newline. With a_red.cri, café.cri, Фото.cri and 日本.cri, list prints "1  a_red.cri", "2  cafΘ.cri", "3  4  " (no names, no line break).
+del 3 on Фото.cri prints only "Delete image 3 (" and never shows "Type YES to confirm:", then "INFO: Image was deleted successfully: " with no name.
+add of C:\Users\boris\Pictures\crivate_images\ПоздравЗаЕмо.mp3 prints an error that stops at "crivate_images\" and runs into the next line.
+Latin-1 names come out as raw single bytes (é is byte 0xE9, which the console shows as Θ). Deleting and viewing those images still works.
+Probably fix with setlocale(LC_ALL, ".UTF8") and UTF-8 console output (SetConsoleOutputCP or WriteConsoleW when the output is a console).
+
+- TODO 0003 (16.10.2026): crivate password drops the read-only and hidden attributes of .crivate and of every .cri file.
+The replacements are temp files with normal attributes. A user who hid .crivate finds it visible again after changing the password.
+
+- TODO 0004 (16.10.2026): A password piped to stdin without a trailing newline is rejected with "Failed to read the password."
+The same bytes from a file redirect (crivate list < pw.txt) work. When the writer closes a pipe, ReadFile fails with ERROR_BROKEN_PIPE
+instead of returning 0 bytes, and read_secret_line treats that as an I/O error instead of EOF. read_pipe_confirm does the same
+(YES without a newline is refused, which at least fails safe).
+
+- TODO 0005 (16.10.2026): In crivate view, when the next image fails to decrypt, the error doesn't say which image ("ERROR: The image file is corrupted.").
+The viewer stays on the current image, so pressing D again hits the same broken file and the user can't get past it with D or tell which index to delete.
+Include the index and name in the message (password already prints the name).
+
+- TODO 0006 (17.10.2026): In crivate view, the window size comes from the first image of the set, so a very wide or very tall first image makes the rest of the set unusable.
+A 2000x20 first image gives a 1536x15 client area, and a 400x400 image after it is shown at 15x15. A 16384x1 first image gives a 1-pixel-tall window,
+and the following images aren't visible at all. A tall 10x1000 first image gives a 120x825 window. Choose the window size so later images
+in the set are still reasonably large (e.g. a minimum client size, or a size that doesn't depend only on the first image).
+
+- TODO 0007 (17.10.2026): An interrupted crivate password (or add) leaves its temp files (crpXXXX.tmp, crhXXXX.tmp, criXXXX.tmp) in the folder forever.
+They are full-size ciphertext under a key whose salt was never saved, so they're useless, and crivate never mentions or removes them.
+Killing password about 400 ms into a 3-photo folder left a 35 MB crp*.tmp. In a big folder it can be many GB.
+Warn about them (e.g. in list/count) or clean them up, without deleting the temps of another crivate process that is still running.
