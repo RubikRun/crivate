@@ -530,6 +530,12 @@ bool add_argument(const wchar_t* path, const AesKey& key) {
     return add_one_image(path, key);
 }
 
+struct KeyGuard {
+    AesKey* key = nullptr;
+
+    ~KeyGuard() { crypto_wipe_key(key); }
+};
+
 int cmd_add(int path_count, wchar_t** paths) {
     const int folder_status = require_folder();
     if (folder_status != kExitOk) {
@@ -537,6 +543,7 @@ int cmd_add(int path_count, wchar_t** paths) {
     }
 
     AesKey key{};
+    KeyGuard key_guard{&key};
     const int unlock_status = prompt_unlock(&key);
     if (unlock_status != kExitOk) {
         return unlock_status;
@@ -634,6 +641,12 @@ void wipe_rgb(std::vector<uint8_t>* rgb) {
     rgb->shrink_to_fit();
 }
 
+struct RgbGuard {
+    std::vector<uint8_t>* rgb = nullptr;
+
+    ~RgbGuard() { wipe_rgb(rgb); }
+};
+
 void print_cri_read_error(CriReadStatus status) {
     switch (status) {
         case CriReadStatus::AuthFailed:
@@ -683,10 +696,10 @@ bool view_load_delta(void* user, int delta, uint32_t* width, uint32_t* height,
     uint32_t loaded_w = 0;
     uint32_t loaded_h = 0;
     std::vector<uint8_t> fresh;
+    RgbGuard fresh_guard{&fresh};
     const CriReadStatus read =
         cri_read(session->set[next].c_str(), *session->key, &loaded_w, &loaded_h, &fresh);
     if (read != CriReadStatus::Ok) {
-        wipe_rgb(&fresh);
         print_cri_read_error(read);
         return false;
     }
@@ -724,6 +737,7 @@ int cmd_view(int index_count, wchar_t** index_args) {
     }
 
     AesKey key{};
+    KeyGuard key_guard{&key};
     const int unlock_status = prompt_unlock(&key);
     if (unlock_status != kExitOk) {
         return unlock_status;
@@ -731,17 +745,14 @@ int cmd_view(int index_count, wchar_t** index_args) {
 
     std::vector<std::wstring> names;
     if (!folder_list_cri(&names)) {
-        crypto_wipe_key(&key);
         fprintf(stderr, "ERROR: Failed to list the directory.\n");
         return kExitError;
     }
     if (names.empty()) {
-        crypto_wipe_key(&key);
         fprintf(stderr, "ERROR: There are no images in the folder.\n");
         return kExitError;
     }
     if (names.size() > (std::numeric_limits<uint32_t>::max)()) {
-        crypto_wipe_key(&key);
         fprintf(stderr, "ERROR: Failed to list the directory.\n");
         return kExitError;
     }
@@ -754,17 +765,16 @@ int cmd_view(int index_count, wchar_t** index_args) {
     }
     if (begin < 1 || end < 1 || static_cast<size_t>(begin) > names.size() ||
         static_cast<size_t>(end) > names.size()) {
-        crypto_wipe_key(&key);
         fprintf(stderr, "ERROR: The image index is out of range.\n");
         return kExitError;
     }
     if (begin > end) {
-        crypto_wipe_key(&key);
         fprintf(stderr, "ERROR: The first index is greater than the last index.\n");
         return kExitError;
     }
 
     ViewSession session;
+    RgbGuard rgb_guard{&session.rgb};
     session.key = &key;
     session.index = 0;
     session.set.reserve(static_cast<size_t>(end) - static_cast<size_t>(begin) + 1);
@@ -777,16 +787,12 @@ int cmd_view(int index_count, wchar_t** index_args) {
     const CriReadStatus read =
         cri_read(session.set[0].c_str(), key, &width, &height, &session.rgb);
     if (read != CriReadStatus::Ok) {
-        wipe_rgb(&session.rgb);
-        crypto_wipe_key(&key);
         print_cri_read_error(read);
         return kExitError;
     }
 
     const ViewerStatus shown = viewer_show(width, height, session.rgb.data(), session.rgb.size(),
                                            view_load_delta, &session);
-    wipe_rgb(&session.rgb);
-    crypto_wipe_key(&key);
 
     if (shown == ViewerStatus::Ok) {
         return kExitOk;
@@ -1109,9 +1115,9 @@ int cmd_password() {
             uint32_t width = 0;
             uint32_t height = 0;
             std::vector<uint8_t> rgb;
+            RgbGuard rgb_guard{&rgb};
             const CriReadStatus read = cri_read(name.c_str(), old_key, &width, &height, &rgb);
             if (read != CriReadStatus::Ok) {
-                wipe_rgb(&rgb);
                 print_password_read_error(read, name.c_str());
                 return kExitError;
             }
@@ -1120,7 +1126,6 @@ int cmd_password() {
             files.back().dest = name;
             const CriWriteStatus written = cri_write_temp(rekey.key, width, height, rgb.data(),
                                                           rgb.size(), &files.back().temp);
-            wipe_rgb(&rgb);
             if (written != CriWriteStatus::Ok || files.back().temp.empty()) {
                 files.pop_back();
                 fprintf(stderr, "ERROR: Failed to change the password.\n");
