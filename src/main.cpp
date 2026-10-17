@@ -991,6 +991,9 @@ int cmd_del(int index_count, wchar_t** index_args) {
 struct RekeyFile {
     std::wstring temp;
     std::wstring dest;
+    // Original ciphertext, renamed aside until .crivate is replaced.
+    // TempCleaner must not delete this: after parking it is the only old copy.
+    std::wstring backup;
 };
 
 struct TempCleaner {
@@ -1028,6 +1031,115 @@ bool replace_with_temp(const wchar_t* temp, const wchar_t* dest) {
     }
     return MoveFileExW(temp, dest, MOVEFILE_REPLACE_EXISTING) != 0;
 }
+
+bool ends_with_cri_name(const wchar_t* path) {
+    if (path == nullptr) {
+        return false;
+    }
+    const size_t n = wcslen(path);
+    if (n < 4) {
+        return false;
+    }
+    return CompareStringOrdinal(path + (n - 4), 4, L".cri", 4, TRUE) == CSTR_EQUAL;
+}
+
+bool delete_allowing_readonly(const wchar_t* path) {
+    if (path == nullptr || path[0] == L'\0') {
+        return false;
+    }
+    if (DeleteFileW(path) != 0) {
+        return true;
+    }
+    const DWORD attr = GetFileAttributesW(path);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    if (SetFileAttributesW(path, attr & ~FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    return DeleteFileW(path) != 0;
+}
+
+// Move dest onto a new temp name. The original bytes stay on disk under backup.
+bool park_original(RekeyFile* file) {
+    if (file == nullptr || file->dest.empty() || !file->backup.empty()) {
+        return false;
+    }
+
+    wchar_t temp_path[MAX_PATH];
+    temp_path[0] = L'\0';
+    if (GetTempFileNameW(L".", L"crb", 0, temp_path) == 0) {
+        return false;
+    }
+    if (ends_with_cri_name(temp_path)) {
+        DeleteFileW(temp_path);
+        return false;
+    }
+
+    std::wstring parked;
+    try {
+        parked.assign(temp_path);
+    } catch (const std::bad_alloc&) {
+        DeleteFileW(temp_path);
+        return false;
+    }
+
+    if (MoveFileExW(file->dest.c_str(), parked.c_str(), MOVEFILE_REPLACE_EXISTING) == 0) {
+        DeleteFileW(temp_path);
+        return false;
+    }
+
+    file->backup.swap(parked);
+    return true;
+}
+
+bool install_rekeyed_image(RekeyFile* file) {
+    if (file == nullptr || file->temp.empty() || file->dest.empty()) {
+        return false;
+    }
+    if (MoveFileW(file->temp.c_str(), file->dest.c_str()) == 0) {
+        return false;
+    }
+    file->temp.clear();
+    return true;
+}
+
+// Put parked originals back on their .cri names. Backups that could not be moved stay set.
+bool restore_parked_originals(std::vector<RekeyFile>* files) {
+    if (files == nullptr) {
+        return false;
+    }
+    bool all_ok = true;
+    for (RekeyFile& file : *files) {
+        if (file.backup.empty()) {
+            continue;
+        }
+        if (!replace_with_temp(file.backup.c_str(), file.dest.c_str())) {
+            all_ok = false;
+            continue;
+        }
+        file.backup.clear();
+    }
+    return all_ok;
+}
+
+// Restores parked images unless committed. Declare it after TempCleaner so a failure
+// puts originals back before new temps are deleted.
+struct OriginalGuard {
+    std::vector<RekeyFile>* files = nullptr;
+    bool committed = false;
+    bool rolled_back = false;
+
+    explicit OriginalGuard(std::vector<RekeyFile>* parked) : files(parked) {}
+    OriginalGuard(const OriginalGuard&) = delete;
+    OriginalGuard& operator=(const OriginalGuard&) = delete;
+
+    ~OriginalGuard() {
+        if (!committed && !rolled_back && files != nullptr) {
+            restore_parked_originals(files);
+        }
+    }
+};
 
 void print_password_read_error(CriReadStatus status, const wchar_t* name) {
     switch (status) {
@@ -1142,22 +1254,62 @@ int cmd_password() {
         return kExitError;
     }
 
-    bool replaced_image = false;
-    for (RekeyFile& file : files) {
-        if (!replace_with_temp(file.temp.c_str(), file.dest.c_str())) {
-            fprintf(stderr, replaced_image ? "ERROR: Failed to finish changing the password.\n"
-                                           : "ERROR: Failed to change the password.\n");
+    // Park every original before installing a replacement. If a later rename fails,
+    // the old ciphertext is still on disk and the folder stays on the old key.
+    OriginalGuard originals(&files);
+    const auto abort_replace = [&](const wchar_t* failed) -> int {
+        bool restored = restore_parked_originals(&files);
+        if (!restored) {
+            restored = restore_parked_originals(&files);
+        }
+        originals.rolled_back = true;
+        if (restored) {
+            fprintf(stderr, "ERROR: Failed to change the password.\n");
+            if (failed != nullptr && failed[0] != L'\0') {
+                fprintf(stderr, "ERROR: Could not replace %ls.\n", failed);
+            }
             return kExitError;
         }
-        file.temp.clear();
-        replaced_image = true;
+        fprintf(stderr, "ERROR: Failed to finish changing the password.\n");
+        for (const RekeyFile& file : files) {
+            if (!file.backup.empty()) {
+                fprintf(stderr,
+                        "ERROR: Put %ls back as %ls, replacing it if it already exists, "
+                        "then run password again.\n",
+                        file.backup.c_str(), file.dest.c_str());
+            }
+        }
+        return kExitError;
+    };
+
+    for (RekeyFile& file : files) {
+        if (!park_original(&file)) {
+            return abort_replace(file.dest.c_str());
+        }
+    }
+    for (RekeyFile& file : files) {
+        if (!install_rekeyed_image(&file)) {
+            return abort_replace(file.dest.c_str());
+        }
     }
     if (!replace_with_temp(header_temp.c_str(), L".crivate")) {
-        fprintf(stderr, files.empty() ? "ERROR: Failed to change the password.\n"
-                                      : "ERROR: Failed to finish changing the password.\n");
-        return kExitError;
+        return abort_replace(L".crivate");
     }
     header_temp.clear();
+    originals.committed = true;
+
+    for (RekeyFile& file : files) {
+        if (file.backup.empty()) {
+            continue;
+        }
+        if (!delete_allowing_readonly(file.backup.c_str())) {
+            fprintf(stderr,
+                    "WARNING: The password was changed, but a leftover file could not be deleted: %ls.\n",
+                    file.backup.c_str());
+            continue;
+        }
+        file.backup.clear();
+    }
 
     fprintf(stderr, "INFO: The password was changed.\n");
     return kExitOk;

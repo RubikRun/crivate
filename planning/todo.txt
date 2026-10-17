@@ -11,7 +11,7 @@ Once a TO-DO task is complete, change it from TODO to DONE in the same commit wh
 Reducing the resolution by pressing the S key solves the problem.
 Some resolutions have the problem and others don't.
 
-- TODO 0001 (16.10.2026): If crivate password fails during the replace phase (phase 2), the images that were already replaced are lost for good.
+- DONE 0001 (16.10.2026): If crivate password fails during the replace phase (phase 2), the images that were already replaced are lost for good.
 Repro: folder with a_red.cri, b_green.cri, j_gradh.cri. Keep b_green.cri open in another program without delete sharing
 (PowerShell: [IO.File]::Open("b_green.cri", 'Open', 'Read', 'Read')), then run crivate password.
 It prints "Failed to finish changing the password." a_red.cri is already encrypted with the new key, .crivate still has the old key,
