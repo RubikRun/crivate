@@ -22,6 +22,9 @@ namespace {
 constexpr UINT kDrawBatches = 100;
 constexpr uint32_t kNStepPercent = 20;
 constexpr int kWorkAreaPercent = 80;
+// Floor for each client edge, as a percent of the smaller 80% work-area edge.
+// A strip-shaped first image letterboxes instead of shrinking the window.
+constexpr int kMinClientPercent = 50;
 constexpr wchar_t kViewerClass[] = L"crivate.Viewer.1";
 
 const char kShaderSrc[] = R"(
@@ -328,6 +331,66 @@ bool fit_client_size(uint32_t img_w, uint32_t img_h, int max_w, int max_h, int* 
     return *out_w >= 1 && *out_h >= 1;
 }
 
+int min_client_edge(int max_w, int max_h) {
+    const int smaller = max_w < max_h ? max_w : max_h;
+    int edge = static_cast<int>((static_cast<long long>(smaller) * kMinClientPercent) / 100);
+    if (edge < 1) {
+        edge = 1;
+    }
+    if (edge > smaller) {
+        edge = smaller;
+    }
+    return edge;
+}
+
+bool choose_client_size(uint32_t img_w, uint32_t img_h, int max_w, int max_h, int* out_w,
+                        int* out_h) {
+    if (!fit_client_size(img_w, img_h, max_w, max_h, out_w, out_h)) {
+        return false;
+    }
+
+    const int floor_edge = min_client_edge(max_w, max_h);
+    if (*out_w < floor_edge) {
+        *out_w = floor_edge;
+    }
+    if (*out_h < floor_edge) {
+        *out_h = floor_edge;
+    }
+    return *out_w >= 1 && *out_h >= 1 && *out_w <= max_w && *out_h <= max_h;
+}
+
+bool choose_client_size_self_check() {
+    int w = 0;
+    int h = 0;
+    // Fixed 1536x825 cap (80% of a 1920x1032 work area), the shape from TODO 0006.
+    if (!choose_client_size(2000, 20, 1536, 825, &w, &h) || w != 1536 || h != 412) {
+        return false;
+    }
+    if (!choose_client_size(16384, 1, 1536, 825, &w, &h) || w != 1536 || h != 412) {
+        return false;
+    }
+    if (!choose_client_size(10, 1000, 1536, 825, &w, &h) || w != 412 || h != 825) {
+        return false;
+    }
+    if (!choose_client_size(1920, 1080, 1536, 825, &w, &h) || w != 1466 || h != 825) {
+        return false;
+    }
+    if (!choose_client_size(9, 16, 1536, 825, &w, &h) || w != 464 || h != 825) {
+        return false;
+    }
+    if (!choose_client_size(400, 400, 1536, 825, &w, &h) || w != 825 || h != 825) {
+        return false;
+    }
+    if (!choose_client_size(3, 2, 1536, 825, &w, &h) || w != 1237 || h != 825) {
+        return false;
+    }
+    // The floor cannot push the client outside the 80% cap.
+    if (!choose_client_size(2000, 20, 40, 30, &w, &h) || w != 40 || h != 15) {
+        return false;
+    }
+    return true;
+}
+
 void batch_range(uint32_t batch, uint32_t count, uint32_t* begin, uint32_t* end) {
     *begin = static_cast<uint32_t>((static_cast<uint64_t>(batch) * count) / kDrawBatches);
     *end = static_cast<uint32_t>((static_cast<uint64_t>(batch + 1) * count) / kDrawBatches);
@@ -534,7 +597,7 @@ bool create_window(ViewerContext* viewer, uint32_t img_w, uint32_t img_h) {
 
     int client_w = 0;
     int client_h = 0;
-    if (!fit_client_size(img_w, img_h, max_w, max_h, &client_w, &client_h)) {
+    if (!choose_client_size(img_w, img_h, max_w, max_h, &client_w, &client_h)) {
         return false;
     }
 
@@ -903,7 +966,7 @@ ViewerStatus viewer_show(uint32_t width, uint32_t height, const uint8_t* rgb, si
         rgb_len != expected) {
         return ViewerStatus::InvalidInput;
     }
-    if (!choose_grid_self_check()) {
+    if (!choose_grid_self_check() || !choose_client_size_self_check()) {
         return ViewerStatus::InvalidInput;
     }
 

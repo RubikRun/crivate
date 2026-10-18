@@ -40,7 +40,7 @@ instead of returning 0 bytes, and read_secret_line treats that as an I/O error i
 The viewer stays on the current image, so pressing D again hits the same broken file and the user can't get past it with D or tell which index to delete.
 Include the index and name in the message (password already prints the name).
 
-- TODO 0006 (17.10.2026): In crivate view, the window size comes from the first image of the set, so a very wide or very tall first image makes the rest of the set unusable.
+- DONE 0006 (18.10.2026): In crivate view, the window size comes from the first image of the set, so a very wide or very tall first image makes the rest of the set unusable.
 A 2000x20 first image gives a 1536x15 client area, and a 400x400 image after it is shown at 15x15. A 16384x1 first image gives a 1-pixel-tall window,
 and the following images aren't visible at all. A tall 10x1000 first image gives a 120x825 window. Choose the window size so later images
 in the set are still reasonably large (e.g. a minimum client size, or a size that doesn't depend only on the first image).
