@@ -28,7 +28,7 @@ add of C:\Users\boris\Pictures\crivate_images\ПоздравЗаЕмо.mp3 print
 Latin-1 names come out as raw single bytes (é is byte 0xE9, which the console shows as Θ). Deleting and viewing those images still works.
 Probably fix with setlocale(LC_ALL, ".UTF8") and UTF-8 console output (SetConsoleOutputCP or WriteConsoleW when the output is a console).
 
-- TODO 0003 (16.10.2026): crivate password drops the read-only and hidden attributes of .crivate and of every .cri file.
+- DONE 0003 (16.10.2026): crivate password drops the read-only and hidden attributes of .crivate and of every .cri file.
 The replacements are temp files with normal attributes. A user who hid .crivate finds it visible again after changing the password.
 
 - TODO 0004 (16.10.2026): A password piped to stdin without a trailing newline is rejected with "Failed to read the password."

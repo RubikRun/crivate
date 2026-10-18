@@ -1145,12 +1145,59 @@ int cmd_del(int index_count, wchar_t** index_args) {
     return kExitOk;
 }
 
+// Bits SetFileAttributes can put back. A rekeyed file is a new temp, and the
+// rename keeps the temp's attributes, so these are copied onto the temp first.
+constexpr DWORD kRestoredFileAttributes = FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_HIDDEN |
+                                          FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
+                                          FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM |
+                                          FILE_ATTRIBUTE_TEMPORARY;
+
+bool settable_file_attributes(DWORD attr, DWORD* out) {
+    if (out == nullptr || attr == INVALID_FILE_ATTRIBUTES ||
+        (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return false;
+    }
+    DWORD kept = attr & kRestoredFileAttributes;
+    if (kept == 0) {
+        kept = FILE_ATTRIBUTE_NORMAL;
+    }
+    *out = kept;
+    return true;
+}
+
+bool apply_file_attributes(const wchar_t* path, DWORD attr) {
+    DWORD kept = 0;
+    if (path == nullptr || path[0] == L'\0' || !settable_file_attributes(attr, &kept)) {
+        return false;
+    }
+    return SetFileAttributesW(path, kept) != 0;
+}
+
+bool delete_allowing_readonly(const wchar_t* path) {
+    if (path == nullptr || path[0] == L'\0') {
+        return false;
+    }
+    if (DeleteFileW(path) != 0) {
+        return true;
+    }
+    const DWORD attr = GetFileAttributesW(path);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    if (SetFileAttributesW(path, attr & ~FILE_ATTRIBUTE_READONLY) == 0) {
+        return false;
+    }
+    return DeleteFileW(path) != 0;
+}
+
 struct RekeyFile {
     std::wstring temp;
     std::wstring dest;
     // Original ciphertext, renamed aside until .crivate is replaced.
     // TempCleaner must not delete this: after parking it is the only old copy.
     std::wstring backup;
+    // Attributes of dest before it was parked. Invalid until park succeeds.
+    DWORD attributes = INVALID_FILE_ATTRIBUTES;
 };
 
 struct TempCleaner {
@@ -1161,12 +1208,12 @@ struct TempCleaner {
         if (files != nullptr) {
             for (const RekeyFile& file : *files) {
                 if (!file.temp.empty()) {
-                    DeleteFileW(file.temp.c_str());
+                    delete_allowing_readonly(file.temp.c_str());
                 }
             }
         }
         if (header != nullptr && !header->empty()) {
-            DeleteFileW(header->c_str());
+            delete_allowing_readonly(header->c_str());
         }
     }
 };
@@ -1200,26 +1247,14 @@ bool ends_with_cri_name(const wchar_t* path) {
     return CompareStringOrdinal(path + (n - 4), 4, L".cri", 4, TRUE) == CSTR_EQUAL;
 }
 
-bool delete_allowing_readonly(const wchar_t* path) {
-    if (path == nullptr || path[0] == L'\0') {
-        return false;
-    }
-    if (DeleteFileW(path) != 0) {
-        return true;
-    }
-    const DWORD attr = GetFileAttributesW(path);
-    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_READONLY) == 0) {
-        return false;
-    }
-    if (SetFileAttributesW(path, attr & ~FILE_ATTRIBUTE_READONLY) == 0) {
-        return false;
-    }
-    return DeleteFileW(path) != 0;
-}
-
 // Move dest onto a new temp name. The original bytes stay on disk under backup.
 bool park_original(RekeyFile* file) {
     if (file == nullptr || file->dest.empty() || !file->backup.empty()) {
+        return false;
+    }
+
+    const DWORD attr = GetFileAttributesW(file->dest.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
         return false;
     }
 
@@ -1246,6 +1281,7 @@ bool park_original(RekeyFile* file) {
         return false;
     }
 
+    file->attributes = attr;
     file->backup.swap(parked);
     return true;
 }
@@ -1254,11 +1290,15 @@ bool install_rekeyed_image(RekeyFile* file) {
     if (file == nullptr || file->temp.empty() || file->dest.empty()) {
         return false;
     }
+    if (!apply_file_attributes(file->temp.c_str(), file->attributes)) {
+        return false;
+    }
     if (MoveFileW(file->temp.c_str(), file->dest.c_str()) == 0) {
         return false;
     }
     file->temp.clear();
-    return true;
+    // The rename sets FILE_ATTRIBUTE_ARCHIVE. Put the saved attributes back.
+    return apply_file_attributes(file->dest.c_str(), file->attributes);
 }
 
 // Put parked originals back on their .cri names. Backups that could not be moved stay set.
@@ -1276,6 +1316,11 @@ bool restore_parked_originals(std::vector<RekeyFile>* files) {
             continue;
         }
         file.backup.clear();
+        // The rename sets FILE_ATTRIBUTE_ARCHIVE. Put the saved attributes back.
+        if (file.attributes != INVALID_FILE_ATTRIBUTES &&
+            !apply_file_attributes(file.dest.c_str(), file.attributes)) {
+            all_ok = false;
+        }
     }
     return all_ok;
 }
@@ -1448,10 +1493,19 @@ int cmd_password() {
             return abort_replace(file.dest.c_str());
         }
     }
-    if (!replace_with_temp(header_temp.c_str(), L".crivate")) {
+    const DWORD header_attr = GetFileAttributesW(L".crivate");
+    if (!apply_file_attributes(header_temp.c_str(), header_attr) ||
+        !replace_with_temp(header_temp.c_str(), L".crivate")) {
         return abort_replace(L".crivate");
     }
     header_temp.clear();
+    // The header is already the new key. Restoring images here would make them
+    // unreadable, so a failed attribute update only warns.
+    if (!apply_file_attributes(L".crivate", header_attr)) {
+        fprintf(stderr,
+                "WARNING: The password was changed, but attributes could not be restored: "
+                ".crivate.\n");
+    }
     originals.committed = true;
 
     for (RekeyFile& file : files) {
