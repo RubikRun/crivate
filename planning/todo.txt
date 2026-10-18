@@ -31,7 +31,7 @@ Probably fix with setlocale(LC_ALL, ".UTF8") and UTF-8 console output (SetConsol
 - DONE 0003 (16.10.2026): crivate password drops the read-only and hidden attributes of .crivate and of every .cri file.
 The replacements are temp files with normal attributes. A user who hid .crivate finds it visible again after changing the password.
 
-- TODO 0004 (16.10.2026): A password piped to stdin without a trailing newline is rejected with "Failed to read the password."
+- DONE 0004 (16.10.2026): A password piped to stdin without a trailing newline is rejected with "Failed to read the password."
 The same bytes from a file redirect (crivate list < pw.txt) work. When the writer closes a pipe, ReadFile fails with ERROR_BROKEN_PIPE
 instead of returning 0 bytes, and read_secret_line treats that as an I/O error instead of EOF. read_pipe_confirm does the same
 (YES without a newline is refused, which at least fails safe).

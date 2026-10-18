@@ -281,15 +281,36 @@ bool drain_console_line(HANDLE h_in) {
     }
 }
 
+// A pipe whose write end has closed fails ReadFile with ERROR_BROKEN_PIPE.
+// A file at EOF succeeds and reports zero bytes. Both end the current line.
+enum class PipeRead {
+    Byte,
+    End,
+    Error,
+};
+
+PipeRead read_pipe_byte(HANDLE h_in, unsigned char* out) {
+    DWORD n = 0;
+    if (!ReadFile(h_in, out, 1, &n, nullptr)) {
+        if (GetLastError() == ERROR_BROKEN_PIPE) {
+            return PipeRead::End;
+        }
+        return PipeRead::Error;
+    }
+    if (n == 0) {
+        return PipeRead::End;
+    }
+    return PipeRead::Byte;
+}
+
 bool drain_pipe_line(HANDLE h_in) {
     unsigned char c = 0;
-    DWORD n = 0;
-    while (ReadFile(h_in, &c, 1, &n, nullptr) && n == 1) {
-        if (c == '\n') {
+    for (;;) {
+        const PipeRead got = read_pipe_byte(h_in, &c);
+        if (got != PipeRead::Byte || c == '\n') {
             return true;
         }
     }
-    return true;
 }
 
 ReadPasswordResult utf16_to_secret(wchar_t* wbuf, DWORD nchars, SecretBuf* out) {
@@ -375,16 +396,13 @@ ReadPasswordResult read_secret_line(SecretBuf* out) {
     raw.reserve(64);
     for (;;) {
         unsigned char c = 0;
-        DWORD n = 0;
-        if (!ReadFile(h_in, &c, 1, &n, nullptr)) {
+        const PipeRead got = read_pipe_byte(h_in, &c);
+        if (got == PipeRead::Error) {
             crypto_wipe(raw.data(), raw.size());
             fputc('\n', stderr);
             return ReadPasswordResult::IoError;
         }
-        if (n == 0) {
-            break;
-        }
-        if (c == '\n') {
+        if (got == PipeRead::End || c == '\n') {
             break;
         }
         if (c == '\r') {
@@ -1003,11 +1021,11 @@ ConfirmResult read_pipe_confirm(HANDLE h_in) {
     bool too_long = false;
     for (;;) {
         unsigned char c = 0;
-        DWORD got = 0;
-        if (!ReadFile(h_in, &c, 1, &got, nullptr)) {
+        const PipeRead got = read_pipe_byte(h_in, &c);
+        if (got == PipeRead::Error) {
             return ConfirmResult::IoError;
         }
-        if (got == 0 || c == '\n') {
+        if (got == PipeRead::End || c == '\n') {
             break;
         }
         if (c == '\r') {
