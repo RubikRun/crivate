@@ -4,6 +4,7 @@
 #include "viewer.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <new>
 #include <cstdio>
@@ -67,6 +68,164 @@ struct ConsoleEchoRestorer {
 
     ~ConsoleEchoRestorer() { restore(); }
 };
+
+// fprintf %ls encodes through the C locale. A name it cannot represent stops the
+// conversion, and the rest of that line, including the newline, is never written.
+// Console handles get Unicode directly. Pipes and files get UTF-8.
+HANDLE standard_handle(FILE* stream) {
+    if (stream == stdout) {
+        return GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    if (stream == stderr) {
+        return GetStdHandle(STD_ERROR_HANDLE);
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+bool is_console_handle(HANDLE handle) {
+    DWORD mode = 0;
+    return handle != nullptr && handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode) != 0;
+}
+
+bool is_utf16_high_surrogate(wchar_t ch) {
+    return static_cast<unsigned int>(ch) >= 0xD800u && static_cast<unsigned int>(ch) <= 0xDBFFu;
+}
+
+void write_console_chars(HANDLE handle, const wchar_t* text, size_t length) {
+    constexpr size_t kChunk = 4096;
+    size_t offset = 0;
+    while (offset < length) {
+        size_t chunk = length - offset;
+        if (chunk > kChunk) {
+            chunk = kChunk;
+        }
+        if (chunk > 1 && offset + chunk < length &&
+            is_utf16_high_surrogate(text[offset + chunk - 1])) {
+            --chunk;
+        }
+        DWORD written = 0;
+        if (WriteConsoleW(handle, text + offset, static_cast<DWORD>(chunk), &written, nullptr) == 0 ||
+            written == 0 || written > chunk) {
+            return;
+        }
+        offset += written;
+    }
+}
+
+void write_console_text(HANDLE handle, const wchar_t* text, size_t length) {
+    size_t start = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (text[i] != L'\n') {
+            continue;
+        }
+        write_console_chars(handle, text + start, i - start);
+        const wchar_t crlf[] = {L'\r', L'\n'};
+        write_console_chars(handle, crlf, 2);
+        start = i + 1;
+    }
+    if (start < length) {
+        write_console_chars(handle, text + start, length - start);
+    }
+}
+
+bool utf8_bytes(const wchar_t* text, size_t length, std::string* out) {
+    if (length == 0) {
+        out->clear();
+        return true;
+    }
+    if (length > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return false;
+    }
+    const int wide_n = static_cast<int>(length);
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, text, wide_n, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) {
+        return false;
+    }
+    out->assign(static_cast<size_t>(bytes), '\0');
+    return WideCharToMultiByte(CP_UTF8, 0, text, wide_n, out->data(), bytes, nullptr, nullptr) ==
+           bytes;
+}
+
+void write_utf8_lossy(FILE* stream, const wchar_t* text, size_t length) {
+    for (size_t i = 0; i < length; ++i) {
+        const wchar_t ch = text[i];
+        if (ch < 128) {
+            fputc(static_cast<int>(ch), stream);
+        } else {
+            fputc('?', stream);
+        }
+    }
+}
+
+void write_utf8_text(FILE* stream, const wchar_t* text, size_t length) {
+    constexpr size_t kChunk = 1024 * 1024;
+    size_t offset = 0;
+    while (offset < length) {
+        size_t chunk = length - offset;
+        if (chunk > kChunk) {
+            chunk = kChunk;
+        }
+        if (chunk > 1 && offset + chunk < length &&
+            is_utf16_high_surrogate(text[offset + chunk - 1])) {
+            --chunk;
+        }
+        std::string utf8;
+        if (!utf8_bytes(text + offset, chunk, &utf8)) {
+            write_utf8_lossy(stream, text + offset, chunk);
+        } else if (fwrite(utf8.data(), 1, utf8.size(), stream) != utf8.size()) {
+            break;
+        }
+        offset += chunk;
+    }
+    fflush(stream);
+}
+
+void write_text(FILE* stream, const wchar_t* text, size_t length) {
+    const HANDLE handle = standard_handle(stream);
+    if (is_console_handle(handle)) {
+        fflush(stream);
+        write_console_text(handle, text, length);
+        return;
+    }
+    write_utf8_text(stream, text, length);
+}
+
+void vprint_stream(FILE* stream, const wchar_t* fmt, va_list args) {
+    if (stream == nullptr || fmt == nullptr) {
+        return;
+    }
+    try {
+        va_list measure;
+        va_copy(measure, args);
+        const int needed = _vscwprintf(fmt, measure);
+        va_end(measure);
+        if (needed < 0) {
+            return;
+        }
+        std::vector<wchar_t> text(static_cast<size_t>(needed) + 1, L'\0');
+        if (needed > 0 && _vsnwprintf_s(text.data(), text.size(), _TRUNCATE, fmt, args) < 0) {
+            return;
+        }
+        write_text(stream, text.data(), static_cast<size_t>(needed));
+    } catch (const std::bad_alloc&) {
+        fputs("ERROR: Not enough memory.\n", stream);
+        fflush(stream);
+    }
+}
+
+void print_out(const wchar_t* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vprint_stream(stdout, fmt, args);
+    va_end(args);
+}
+
+void print_err(const wchar_t* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vprint_stream(stderr, fmt, args);
+    va_end(args);
+}
 
 void print_usage() {
     fprintf(stderr,
@@ -408,12 +567,12 @@ bool image_file_less(const std::wstring& a, const std::wstring& b) {
 bool add_one_image(const wchar_t* image_path, const AesKey& key) {
     std::wstring dest;
     if (!cri_dest_name(image_path, &dest)) {
-        fprintf(stderr, "ERROR: The image path is invalid: %ls.\n", image_path);
+        print_err(L"ERROR: The image path is invalid: %ls.\n", image_path);
         return false;
     }
     if (cri_exists(dest.c_str())) {
-        fprintf(stderr, "WARNING: Skipping %ls. A .cri file named %ls already exists.\n",
-                image_path, dest.c_str());
+        print_err(L"WARNING: Skipping %ls. A .cri file named %ls already exists.\n", image_path,
+                dest.c_str());
         return true;
     }
 
@@ -422,18 +581,17 @@ bool add_one_image(const wchar_t* image_path, const AesKey& key) {
     if (load != ImageLoadStatus::Ok) {
         switch (load) {
             case ImageLoadStatus::NotFound:
-                fprintf(stderr, "ERROR: The image file was not found: %ls.\n", image_path);
+                print_err(L"ERROR: The image file was not found: %ls.\n", image_path);
                 break;
             case ImageLoadStatus::TooLarge:
-                fprintf(stderr, "ERROR: The image is too large: %ls.\n", image_path);
+                print_err(L"ERROR: The image is too large: %ls.\n", image_path);
                 break;
             case ImageLoadStatus::NotAnImage:
-                fprintf(stderr, "ERROR: The file is not an image that can be decoded: %ls.\n",
-                        image_path);
+                print_err(L"ERROR: The file is not an image that can be decoded: %ls.\n", image_path);
                 break;
             case ImageLoadStatus::IoError:
             default:
-                fprintf(stderr, "ERROR: Failed to read the image: %ls.\n", image_path);
+                print_err(L"ERROR: Failed to read the image: %ls.\n", image_path);
                 break;
         }
         return false;
@@ -445,14 +603,14 @@ bool add_one_image(const wchar_t* image_path, const AesKey& key) {
 
     switch (written) {
         case CriWriteStatus::Ok:
-            fprintf(stderr, "INFO: Image was added successfully under %ls.\n", dest.c_str());
+            print_err(L"INFO: Image was added successfully under %ls.\n", dest.c_str());
             return true;
         case CriWriteStatus::Exists:
-            fprintf(stderr, "WARNING: Skipping %ls. A .cri file named %ls already exists.\n",
-                    image_path, dest.c_str());
+            print_err(L"WARNING: Skipping %ls. A .cri file named %ls already exists.\n", image_path,
+                    dest.c_str());
             return true;
         default:
-            fprintf(stderr, "ERROR: Failed to add the image: %ls.\n", image_path);
+            print_err(L"ERROR: Failed to add the image: %ls.\n", image_path);
             return false;
     }
 }
@@ -468,7 +626,7 @@ bool add_directory(const wchar_t* dir, const AesKey& key) {
     WIN32_FIND_DATAW fd{};
     FindHandle find(FindFirstFileW(pattern.c_str(), &fd));
     if (!find.valid()) {
-        fprintf(stderr, "ERROR: Failed to list the directory: %ls.\n", dir);
+        print_err(L"ERROR: Failed to list the directory: %ls.\n", dir);
         return false;
     }
 
@@ -484,12 +642,12 @@ bool add_directory(const wchar_t* dir, const AesKey& key) {
     } while (FindNextFileW(find.h, &fd));
 
     if (GetLastError() != ERROR_NO_MORE_FILES) {
-        fprintf(stderr, "ERROR: Failed to list the directory: %ls.\n", dir);
+        print_err(L"ERROR: Failed to list the directory: %ls.\n", dir);
         return false;
     }
 
     if (images.empty()) {
-        fprintf(stderr, "WARNING: %ls contains no image files.\n", dir);
+        print_err(L"WARNING: %ls contains no image files.\n", dir);
         return true;
     }
 
@@ -515,11 +673,11 @@ bool add_argument(const wchar_t* path, const AesKey& key) {
     if (attr == INVALID_FILE_ATTRIBUTES) {
         const DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-            fprintf(stderr, "ERROR: The path was not found: %ls.\n", path);
+            print_err(L"ERROR: The path was not found: %ls.\n", path);
         } else if (err == ERROR_INVALID_NAME) {
-            fprintf(stderr, "ERROR: The image path is invalid: %ls.\n", path);
+            print_err(L"ERROR: The image path is invalid: %ls.\n", path);
         } else {
-            fprintf(stderr, "ERROR: Failed to read the path: %ls.\n", path);
+            print_err(L"ERROR: Failed to read the path: %ls.\n", path);
         }
         return false;
     }
@@ -607,7 +765,7 @@ int cmd_list() {
     }
 
     for (size_t i = 0; i < names.size(); ++i) {
-        fprintf(stdout, "%zu  %ls\n", i + 1, names[i].c_str());
+        print_out(L"%zu  %ls\n", i + 1, names[i].c_str());
     }
     return kExitOk;
 }
@@ -965,8 +1123,7 @@ int cmd_del(int index_count, wchar_t** index_args) {
     if (index_count == 0) {
         fprintf(stderr, "Delete all %zu images? Type YES to confirm: ", names.size());
     } else if (begin == end) {
-        fprintf(stderr, "Delete image %u (%ls)? Type YES to confirm: ", begin,
-                names[begin - 1].c_str());
+        print_err(L"Delete image %u (%ls)? Type YES to confirm: ", begin, names[begin - 1].c_str());
     } else {
         fprintf(stderr, "Delete images %u through %u (%zu images)? Type YES to confirm: ", begin,
                 end, remove_count);
@@ -980,10 +1137,10 @@ int cmd_del(int index_count, wchar_t** index_args) {
     for (size_t index = begin; index <= end; ++index) {
         const wchar_t* name = names[index - 1].c_str();
         if (!folder_delete_cri(name)) {
-            fprintf(stderr, "ERROR: Failed to delete the image: %ls.\n", name);
+            print_err(L"ERROR: Failed to delete the image: %ls.\n", name);
             return kExitError;
         }
-        fprintf(stderr, "INFO: Image was deleted successfully: %ls.\n", name);
+        print_err(L"INFO: Image was deleted successfully: %ls.\n", name);
     }
     return kExitOk;
 }
@@ -1144,20 +1301,20 @@ struct OriginalGuard {
 void print_password_read_error(CriReadStatus status, const wchar_t* name) {
     switch (status) {
         case CriReadStatus::AuthFailed:
-            fprintf(stderr, "ERROR: Failed to change the password. The image file is corrupted: %ls.\n",
-                    name);
+            print_err(L"ERROR: Failed to change the password. The image file is corrupted: %ls.\n",
+                      name);
             break;
         case CriReadStatus::OutOfMemory:
-            fprintf(stderr, "ERROR: Failed to change the password. The image is too large: %ls.\n",
-                    name);
+            print_err(L"ERROR: Failed to change the password. The image is too large: %ls.\n",
+                      name);
             break;
         case CriReadStatus::InvalidFile:
-            fprintf(stderr, "ERROR: Failed to change the password. The image file is invalid: %ls.\n",
-                    name);
+            print_err(L"ERROR: Failed to change the password. The image file is invalid: %ls.\n",
+                      name);
             break;
         default:
-            fprintf(stderr, "ERROR: Failed to change the password. Failed to read the image: %ls.\n",
-                    name);
+            print_err(L"ERROR: Failed to change the password. Failed to read the image: %ls.\n",
+                      name);
             break;
     }
 }
@@ -1266,17 +1423,16 @@ int cmd_password() {
         if (restored) {
             fprintf(stderr, "ERROR: Failed to change the password.\n");
             if (failed != nullptr && failed[0] != L'\0') {
-                fprintf(stderr, "ERROR: Could not replace %ls.\n", failed);
+                print_err(L"ERROR: Could not replace %ls.\n", failed);
             }
             return kExitError;
         }
         fprintf(stderr, "ERROR: Failed to finish changing the password.\n");
         for (const RekeyFile& file : files) {
             if (!file.backup.empty()) {
-                fprintf(stderr,
-                        "ERROR: Put %ls back as %ls, replacing it if it already exists, "
-                        "then run password again.\n",
-                        file.backup.c_str(), file.dest.c_str());
+                print_err(L"ERROR: Put %ls back as %ls, replacing it if it already exists, "
+                          L"then run password again.\n",
+                          file.backup.c_str(), file.dest.c_str());
             }
         }
         return kExitError;
@@ -1303,8 +1459,8 @@ int cmd_password() {
             continue;
         }
         if (!delete_allowing_readonly(file.backup.c_str())) {
-            fprintf(stderr,
-                    "WARNING: The password was changed, but a leftover file could not be deleted: %ls.\n",
+            print_err(L"WARNING: The password was changed, but a leftover file could not be "
+                    L"deleted: %ls.\n",
                     file.backup.c_str());
             continue;
         }

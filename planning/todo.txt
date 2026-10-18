@@ -20,7 +20,7 @@ password can't be retried (it stops at a_red.cri as corrupted), and crivate view
 Antivirus, backup or sync tools that briefly hold a file open can trigger this. Keep the old .cri files (or at least the new .crivate temp)
 until every rename has succeeded, and roll back or tell the user what to do if a rename fails.
 
-- TODO 0002 (16.10.2026): File names with non-ASCII characters break crivate's output (list, the del prompt, INFO/WARNING/ERROR lines).
+- DONE 0002 (16.10.2026): File names with non-ASCII characters break crivate's output (list, the del prompt, INFO/WARNING/ERROR lines).
 Names are printed with %ls through the CRT's default "C" locale. For Cyrillic/CJK names the print fails at the name and the rest of the line is lost,
 including the newline. With a_red.cri, café.cri, Фото.cri and 日本.cri, list prints "1  a_red.cri", "2  cafΘ.cri", "3  4  " (no names, no line break).
 del 3 on Фото.cri prints only "Delete image 3 (" and never shows "Type YES to confirm:", then "INFO: Image was deleted successfully: " with no name.
