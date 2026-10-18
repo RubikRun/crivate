@@ -36,7 +36,7 @@ The same bytes from a file redirect (crivate list < pw.txt) work. When the write
 instead of returning 0 bytes, and read_secret_line treats that as an I/O error instead of EOF. read_pipe_confirm does the same
 (YES without a newline is refused, which at least fails safe).
 
-- TODO 0005 (16.10.2026): In crivate view, when the next image fails to decrypt, the error doesn't say which image ("ERROR: The image file is corrupted.").
+- DONE 0005 (18.10.2026): In crivate view, when the next image fails to decrypt, the error doesn't say which image ("ERROR: The image file is corrupted.").
 The viewer stays on the current image, so pressing D again hits the same broken file and the user can't get past it with D or tell which index to delete.
 Include the index and name in the message (password already prints the name).
 

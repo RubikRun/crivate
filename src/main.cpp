@@ -823,19 +823,22 @@ struct RgbGuard {
     ~RgbGuard() { wipe_rgb(rgb); }
 };
 
-void print_cri_read_error(CriReadStatus status) {
+void print_cri_read_error(CriReadStatus status, uint32_t index, const wchar_t* name) {
+    if (name == nullptr) {
+        name = L"";
+    }
     switch (status) {
         case CriReadStatus::AuthFailed:
-            fprintf(stderr, "ERROR: The image file is corrupted.\n");
+            print_err(L"ERROR: The image file is corrupted: image %u (%ls).\n", index, name);
             break;
         case CriReadStatus::OutOfMemory:
-            fprintf(stderr, "ERROR: The image is too large.\n");
+            print_err(L"ERROR: The image is too large: image %u (%ls).\n", index, name);
             break;
         case CriReadStatus::InvalidFile:
-            fprintf(stderr, "ERROR: The image file is invalid.\n");
+            print_err(L"ERROR: The image file is invalid: image %u (%ls).\n", index, name);
             break;
         default:
-            fprintf(stderr, "ERROR: Failed to read the image.\n");
+            print_err(L"ERROR: Failed to read the image: image %u (%ls).\n", index, name);
             break;
     }
 }
@@ -844,8 +847,14 @@ struct ViewSession {
     AesKey* key = nullptr;
     std::vector<std::wstring> set;
     size_t index = 0;
+    // 1-based folder index of set[0], the same index list and del use.
+    uint32_t album_begin = 1;
     std::vector<uint8_t> rgb;
 };
+
+uint32_t view_album_index(const ViewSession& session, size_t set_index) {
+    return session.album_begin + static_cast<uint32_t>(set_index);
+}
 
 bool view_load_delta(void* user, int delta, uint32_t* width, uint32_t* height,
                      const uint8_t** rgb_out, size_t* rgb_len) {
@@ -876,7 +885,7 @@ bool view_load_delta(void* user, int delta, uint32_t* width, uint32_t* height,
     const CriReadStatus read =
         cri_read(session->set[next].c_str(), *session->key, &loaded_w, &loaded_h, &fresh);
     if (read != CriReadStatus::Ok) {
-        print_cri_read_error(read);
+        print_cri_read_error(read, view_album_index(*session, next), session->set[next].c_str());
         return false;
     }
 
@@ -953,6 +962,7 @@ int cmd_view(int index_count, wchar_t** index_args) {
     RgbGuard rgb_guard{&session.rgb};
     session.key = &key;
     session.index = 0;
+    session.album_begin = begin;
     session.set.reserve(static_cast<size_t>(end) - static_cast<size_t>(begin) + 1);
     for (size_t i = begin; i <= end; ++i) {
         session.set.push_back(std::move(names[i - 1]));
@@ -963,7 +973,7 @@ int cmd_view(int index_count, wchar_t** index_args) {
     const CriReadStatus read =
         cri_read(session.set[0].c_str(), key, &width, &height, &session.rgb);
     if (read != CriReadStatus::Ok) {
-        print_cri_read_error(read);
+        print_cri_read_error(read, view_album_index(session, 0), session.set[0].c_str());
         return kExitError;
     }
 
