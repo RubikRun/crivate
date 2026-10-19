@@ -680,6 +680,57 @@ bool add_directory(const wchar_t* dir, const AesKey& key) {
     return ok;
 }
 
+void report_orphan_temps(const OrphanTempResult& result) {
+    if (!result.scanned) {
+        return;
+    }
+    if (result.removed == 1) {
+        fprintf(stderr, "WARNING: Removed a leftover temporary file from an interrupted command.\n");
+    } else if (result.removed > 1) {
+        fprintf(stderr,
+                "WARNING: Removed %u leftover temporary files from an interrupted command.\n",
+                static_cast<unsigned>(result.removed));
+    }
+    for (const std::wstring& name : result.busy) {
+        print_err(L"WARNING: A leftover temporary file could not be removed: %ls.\n", name.c_str());
+    }
+    for (const std::wstring& name : result.parked) {
+        print_err(L"WARNING: Left a temporary file in place: %ls. It may be an image from an "
+                  L"interrupted password change.\n",
+                  name.c_str());
+    }
+}
+
+// list, count, view, and del do not create cri/crp/crh temps. If an add or
+// password is in progress, leave its files alone.
+void reclaim_if_idle() {
+    FolderActivity activity;
+    if (activity.try_acquire() != FolderActivityState::Held) {
+        return;
+    }
+    report_orphan_temps(folder_reclaim_orphan_temps());
+}
+
+// Hold the activity mutex for the rest of add or password, and remove temps
+// left by a command that is no longer running.
+int begin_mutation(FolderActivity* activity) {
+    if (activity == nullptr) {
+        fprintf(stderr, "ERROR: Failed to prepare this folder.\n");
+        return kExitError;
+    }
+    FolderActivityState taken = activity->try_acquire();
+    if (taken == FolderActivityState::Busy) {
+        fprintf(stderr, "INFO: Waiting until another crivate command finishes.\n");
+        taken = activity->acquire();
+    }
+    if (taken != FolderActivityState::Held) {
+        fprintf(stderr, "ERROR: Failed to prepare this folder.\n");
+        return kExitError;
+    }
+    report_orphan_temps(folder_reclaim_orphan_temps());
+    return kExitOk;
+}
+
 // False means this argument had a hard failure. Skipped files are not failures.
 bool add_argument(const wchar_t* path, const AesKey& key) {
     if (path == nullptr || path[0] == L'\0') {
@@ -725,6 +776,12 @@ int cmd_add(int path_count, wchar_t** paths) {
         return unlock_status;
     }
 
+    FolderActivity activity;
+    const int mutation = begin_mutation(&activity);
+    if (mutation != kExitOk) {
+        return mutation;
+    }
+
     bool hard_failure = false;
     for (int i = 0; i < path_count; ++i) {
         if (!add_argument(paths[i], key)) {
@@ -748,6 +805,8 @@ int cmd_count() {
     }
     crypto_wipe_key(&key);
 
+    reclaim_if_idle();
+
     std::vector<std::wstring> names;
     if (!folder_list_cri(&names)) {
         fprintf(stderr, "ERROR: Failed to list the directory.\n");
@@ -770,6 +829,8 @@ int cmd_list() {
         return unlock_status;
     }
     crypto_wipe_key(&key);
+
+    reclaim_if_idle();
 
     std::vector<std::wstring> names;
     if (!folder_list_cri(&names)) {
@@ -927,6 +988,8 @@ int cmd_view(int index_count, wchar_t** index_args) {
     if (unlock_status != kExitOk) {
         return unlock_status;
     }
+
+    reclaim_if_idle();
 
     std::vector<std::wstring> names;
     if (!folder_list_cri(&names)) {
@@ -1115,6 +1178,8 @@ int cmd_del(int index_count, wchar_t** index_args) {
         return unlock_status;
     }
     crypto_wipe_key(&key);
+
+    reclaim_if_idle();
 
     std::vector<std::wstring> names;
     if (!folder_list_cri(&names)) {
@@ -1440,6 +1505,12 @@ int cmd_password() {
         return kExitError;
     }
     next_password.wipe();
+
+    FolderActivity activity;
+    const int mutation = begin_mutation(&activity);
+    if (mutation != kExitOk) {
+        return mutation;
+    }
 
     std::vector<std::wstring> names;
     if (!folder_list_cri(&names)) {

@@ -54,3 +54,47 @@ bool folder_list_cri(std::vector<std::wstring>* names);
 
 // Delete a cwd .cri basename. Rejects paths. Does not touch .crivate.
 bool folder_delete_cri(const wchar_t* basename);
+
+enum class FolderActivityState {
+    Held,
+    Busy,
+    Error,
+};
+
+// Serializes add and password in this folder. Hold one from the moment those
+// commands might create a temp until the temp has been renamed or deleted.
+// If the owner is killed, the mutex is abandoned and the next command can
+// remove the leftovers.
+class FolderActivity {
+public:
+    FolderActivity() = default;
+    ~FolderActivity();
+    FolderActivity(const FolderActivity&) = delete;
+    FolderActivity& operator=(const FolderActivity&) = delete;
+
+    // Zero wait. Busy means another crivate process holds the mutex.
+    FolderActivityState try_acquire();
+    // Waits until the mutex can be taken.
+    FolderActivityState acquire();
+
+private:
+    bool open_mutex();
+    void release();
+
+    void* mutex_ = nullptr;
+    bool owned_ = false;
+};
+
+struct OrphanTempResult {
+    bool scanned = false;
+    uint32_t removed = 0;
+    // cri/crp/crh temps that exist but could not be deleted.
+    std::vector<std::wstring> busy;
+    // crb temps. Not deleted: a killed password may have parked the only copy
+    // of an image under this name.
+    std::vector<std::wstring> parked;
+};
+
+// Delete abandoned cri/crp/crh temps in cwd. Does not delete crb temps.
+// Caller must hold FolderActivity so a file another crivate is writing stays put.
+OrphanTempResult folder_reclaim_orphan_temps();

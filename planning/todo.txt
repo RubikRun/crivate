@@ -45,7 +45,7 @@ A 2000x20 first image gives a 1536x15 client area, and a 400x400 image after it 
 and the following images aren't visible at all. A tall 10x1000 first image gives a 120x825 window. Choose the window size so later images
 in the set are still reasonably large (e.g. a minimum client size, or a size that doesn't depend only on the first image).
 
-- TODO 0007 (17.10.2026): An interrupted crivate password (or add) leaves its temp files (crpXXXX.tmp, crhXXXX.tmp, criXXXX.tmp) in the folder forever.
+- DONE 0007 (17.10.2026): An interrupted crivate password (or add) leaves its temp files (crpXXXX.tmp, crhXXXX.tmp, criXXXX.tmp) in the folder forever.
 They are full-size ciphertext under a key whose salt was never saved, so they're useless, and crivate never mentions or removes them.
 Killing password about 400 ms into a 3-photo folder left a 35 MB crp*.tmp. In a big folder it can be many GB.
 Warn about them (e.g. in list/count) or clean them up, without deleting the temps of another crivate process that is still running.

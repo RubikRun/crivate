@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <new>
+#include <utility>
 #include <windows.h>
 
 namespace {
@@ -121,6 +123,179 @@ bool name_has_cri_extension(const wchar_t* name) {
 
 bool cri_name_less(const std::wstring& a, const std::wstring& b) {
     return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+}
+
+bool hex_digit(wchar_t c) {
+    return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+}
+
+// GetTempFileNameW(".", prefix, 0) with a 3-letter prefix: prefix, 1 to 4 hex
+// digits, then ".tmp". Short values are not zero-padded (criB.tmp, crpFFFF.tmp).
+enum class WorkTempKind {
+    None,
+    Disposable,
+    Parked,
+};
+
+WorkTempKind work_temp_kind(const wchar_t* name) {
+    if (name == nullptr) {
+        return WorkTempKind::None;
+    }
+    const size_t n = wcslen(name);
+    if (n < 8 || n > 11) {
+        return WorkTempKind::None;
+    }
+    if (CompareStringOrdinal(name + (n - 4), 4, L".tmp", 4, TRUE) != CSTR_EQUAL) {
+        return WorkTempKind::None;
+    }
+    const size_t hex_len = n - 7;
+    for (size_t i = 0; i < hex_len; ++i) {
+        if (!hex_digit(name[3 + i])) {
+            return WorkTempKind::None;
+        }
+    }
+    if (CompareStringOrdinal(name, 3, L"crb", 3, TRUE) == CSTR_EQUAL) {
+        return WorkTempKind::Parked;
+    }
+    if (CompareStringOrdinal(name, 3, L"cri", 3, TRUE) == CSTR_EQUAL ||
+        CompareStringOrdinal(name, 3, L"crp", 3, TRUE) == CSTR_EQUAL ||
+        CompareStringOrdinal(name, 3, L"crh", 3, TRUE) == CSTR_EQUAL) {
+        return WorkTempKind::Disposable;
+    }
+    return WorkTempKind::None;
+}
+
+enum class DeleteTemp {
+    Removed,
+    Busy,
+    Missing,
+};
+
+DeleteTemp exclusive_delete(const wchar_t* name) {
+    const DWORD attr = GetFileAttributesW(name);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            return DeleteTemp::Missing;
+        }
+        return DeleteTemp::Busy;
+    }
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0 || (attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return DeleteTemp::Busy;
+    }
+
+    const DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE handle = CreateFileW(name, DELETE, 0, nullptr, OPEN_EXISTING, flags, nullptr);
+    bool cleared_readonly = false;
+    if (handle == INVALID_HANDLE_VALUE && (attr & FILE_ATTRIBUTE_READONLY) != 0 &&
+        GetLastError() == ERROR_ACCESS_DENIED) {
+        if (SetFileAttributesW(name, attr & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY)) == 0) {
+            return DeleteTemp::Busy;
+        }
+        cleared_readonly = true;
+        handle = CreateFileW(name, DELETE, 0, nullptr, OPEN_EXISTING, flags, nullptr);
+    }
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        if (cleared_readonly) {
+            SetFileAttributesW(name, attr);
+        }
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            return DeleteTemp::Missing;
+        }
+        return DeleteTemp::Busy;
+    }
+
+    CloseHandle(handle);
+    if (GetFileAttributesW(name) != INVALID_FILE_ATTRIBUTES) {
+        return DeleteTemp::Busy;
+    }
+    return DeleteTemp::Removed;
+}
+
+bool collect_work_temps(std::vector<std::wstring>* disposable, std::vector<std::wstring>* parked) {
+    WIN32_FIND_DATAW fd{};
+    FindHandle find(FindFirstFileW(L"*.tmp", &fd));
+    if (!find.valid()) {
+        return GetLastError() == ERROR_FILE_NOT_FOUND;
+    }
+
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue;
+        }
+        const WorkTempKind kind = work_temp_kind(fd.cFileName);
+        if (kind == WorkTempKind::Disposable) {
+            disposable->emplace_back(fd.cFileName);
+        } else if (kind == WorkTempKind::Parked) {
+            parked->emplace_back(fd.cFileName);
+        }
+    } while (FindNextFileW(find.h, &fd));
+
+    return GetLastError() == ERROR_NO_MORE_FILES;
+}
+
+uint64_t fnv1a64(const wchar_t* text, size_t n) {
+    uint64_t hash = 14695981039346656037ull;
+    for (size_t i = 0; i < n; ++i) {
+        hash ^= static_cast<uint16_t>(text[i]);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+// Stable for concurrent processes in this folder. Not required to survive reboot.
+bool activity_mutex_name(std::wstring* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    out->clear();
+
+    FileHandle dir(CreateFileW(L".", FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                               OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!dir.valid()) {
+        return false;
+    }
+
+    std::wstring path(512, L'\0');
+    DWORD n = 0;
+    for (;;) {
+        n = GetFinalPathNameByHandleW(dir.h, path.data(), static_cast<DWORD>(path.size()),
+                                      VOLUME_NAME_NT);
+        if (n == 0) {
+            return false;
+        }
+        if (n < path.size()) {
+            break;
+        }
+        if (n > 32768) {
+            return false;
+        }
+        path.resize(static_cast<size_t>(n));
+    }
+    path.resize(n);
+
+    std::wstring folded;
+    const int src_n = static_cast<int>(path.size());
+    const int mapped = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.c_str(), src_n,
+                                     nullptr, 0, nullptr, nullptr, 0);
+    if (mapped > 0) {
+        folded.assign(static_cast<size_t>(mapped), L'\0');
+        if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.c_str(), src_n, folded.data(),
+                          mapped, nullptr, nullptr, 0) == mapped) {
+            path.swap(folded);
+        }
+    }
+
+    wchar_t name[40];
+    const int wrote = _snwprintf_s(name, _TRUNCATE, L"Local\\crivate-%016llx",
+                                   static_cast<unsigned long long>(fnv1a64(path.data(), path.size())));
+    if (wrote <= 0) {
+        return false;
+    }
+    out->assign(name);
+    return true;
 }
 
 }  // namespace
@@ -472,4 +647,97 @@ bool folder_exe_in_cwd() {
     strip_trailing_slash(cwd);
 
     return CompareStringOrdinal(exe, -1, cwd, -1, TRUE) == CSTR_EQUAL;
+}
+
+FolderActivity::~FolderActivity() {
+    release();
+    if (mutex_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(mutex_));
+        mutex_ = nullptr;
+    }
+}
+
+bool FolderActivity::open_mutex() {
+    if (mutex_ != nullptr) {
+        return true;
+    }
+    std::wstring name;
+    if (!activity_mutex_name(&name)) {
+        return false;
+    }
+    const HANDLE created = CreateMutexW(nullptr, FALSE, name.c_str());
+    if (created == nullptr) {
+        return false;
+    }
+    mutex_ = created;
+    return true;
+}
+
+void FolderActivity::release() {
+    if (!owned_) {
+        return;
+    }
+    ReleaseMutex(static_cast<HANDLE>(mutex_));
+    owned_ = false;
+}
+
+FolderActivityState FolderActivity::try_acquire() {
+    if (owned_) {
+        return FolderActivityState::Held;
+    }
+    if (!open_mutex()) {
+        return FolderActivityState::Error;
+    }
+    const DWORD waited = WaitForSingleObject(static_cast<HANDLE>(mutex_), 0);
+    if (waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED) {
+        owned_ = true;
+        return FolderActivityState::Held;
+    }
+    if (waited == WAIT_TIMEOUT) {
+        return FolderActivityState::Busy;
+    }
+    return FolderActivityState::Error;
+}
+
+FolderActivityState FolderActivity::acquire() {
+    if (owned_) {
+        return FolderActivityState::Held;
+    }
+    if (!open_mutex()) {
+        return FolderActivityState::Error;
+    }
+    const DWORD waited = WaitForSingleObject(static_cast<HANDLE>(mutex_), INFINITE);
+    if (waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED) {
+        owned_ = true;
+        return FolderActivityState::Held;
+    }
+    return FolderActivityState::Error;
+}
+
+OrphanTempResult folder_reclaim_orphan_temps() {
+    OrphanTempResult result;
+    try {
+        std::vector<std::wstring> disposable;
+        std::vector<std::wstring> parked;
+        if (!collect_work_temps(&disposable, &parked)) {
+            return result;
+        }
+        std::sort(disposable.begin(), disposable.end(), cri_name_less);
+        std::sort(parked.begin(), parked.end(), cri_name_less);
+        result.scanned = true;
+        for (const std::wstring& name : disposable) {
+            const DeleteTemp deleted = exclusive_delete(name.c_str());
+            if (deleted == DeleteTemp::Removed) {
+                if (result.removed < 0xFFFFFFFFu) {
+                    ++result.removed;
+                }
+            } else if (deleted == DeleteTemp::Busy) {
+                result.busy.push_back(name);
+            }
+        }
+        result.parked = std::move(parked);
+    } catch (const std::bad_alloc&) {
+        return result;
+    }
+    return result;
 }
