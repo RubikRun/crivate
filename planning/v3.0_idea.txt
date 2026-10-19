@@ -1,0 +1,7 @@
+==== These are ideas for v3.0 of crivate ====
+
+1. Allow resizing of viewer window
+2. Allow zoom in viewer window
+3. Anti-aliasing in viewer window
+4. Show loading percentage during password change
+5. Allow rotating an image 90 degrees left/right in viewer window
